@@ -1,0 +1,103 @@
+{
+  "release": "4.4",
+  "generated_at": "2026-11-09T20:42:50.936444+00:00",
+  "files": {
+    "ai_nest/cli.py": {
+      "status": "installed",
+      "sha256": "85dad8411a1900579f5f6cedefff6f279b0494c089856f3b4023e06996a6581f"
+    },
+    "ai_nest/memory.py": {
+      "status": "installed",
+      "sha256": "ee9da0f16d9cc0c5704368b88ba326d1e22a28e471518026b51299f2b16908e1"
+    },
+    "install.py": {
+      "status": "installed",
+      "sha256": "ae21c4977e04fe7e0d9ab900f4e96208af22c96f8d702399ade435b638c0a4c1"
+    },
+    "ai_nest/prompts/explore.md": {
+      "status": "installed",
+      "sha256": "9f4b4154b0cc6a1ea33346bc0d6e3822bc957d8f9d783986869398e60249448c"
+    },
+    "ai_nest/prompts/implement.md": {
+      "status": "installed",
+      "sha256": "f6b9a46161ebc0f3faf361859720c6130b81eb50564d9789fd6a694762604c28"
+    },
+    "ai_nest/prompts/security_review.md": {
+      "status": "installed",
+      "sha256": "4ee4d0f6ef86082e46aada34e332c7b4735f16bcc63ce609e75736e5b28321c7"
+    },
+    "ai_nest/prompts/tests.md": {
+      "status": "installed",
+      "sha256": "626d52d027b8c5294e852dd3e4c35528e2ffba9f685d907d1ccd11c19adedfab"
+    },
+    "ai_nest/prompts/repair.md": {
+      "status": "installed",
+      "sha256": "c3381f6d73e6d630c28848b744cb7250c6fd99ea07457bc3f8c912cafb2b44b0"
+    },
+    "ai_nest/prompts/protected_tests.md": {
+      "status": "installed",
+      "sha256": "53da296651d2f7c0f28e83e1a73fe5dac11068adf16acb89187a331742ab04b3"
+    },
+    "ai_nest/prompts/plan.md": {
+      "status": "installed",
+      "sha256": "e20d1a06ee513eae980810239671cc4a461d09244c8a5bfbcaaa9082dce6cce2"
+    },
+    "ai_nest/prompts/specify.md": {
+      "status": "installed",
+      "sha256": "c09704d7ac1d5763b3b18028898454806076a11275dd710d39ac23998fe497e1"
+    },
+    "ai_nest/prompts/review.md": {
+      "status": "installed",
+      "sha256": "e11dae6962f013b45ba930b3219e2d4e5fe5878254597c8a1c7ac8d3e551e60b"
+    },
+    ".agents/skills/build-feature/SKILL.md": {
+      "status": "installed",
+      "sha256": "4f17caf0f5bc03db935d891bf70be0f7e2843a59e613a74c9c22fae72a89e297"
+    },
+    ".claude/skills/build-feature/SKILL.md": {
+      "status": "installed",
+      "sha256": "4f17caf0f5bc03db935d891bf70be0f7e2843a59e613a74c9c22fae72a89e297"
+    },
+    "scripts/verify.sh": {
+      "status": "installed",
+      "sha256": "506ce85594fe2d6fe7db2841bb3fa87ea89f7bc7e0e7031cbb0c5c43b2402ee8"
+    },
+    "scripts/verify.py": {
+      "status": "installed",
+      "sha256": "5a91d0cff9842dc703fc38f23b834d9b2b6c0a2b799da0e0106d1b0b613abd91"
+    },
+    "scripts/verify.config.json.example": {
+      "status": "preserved",
+      "sha256": "ae4ba6b31e694ca417981669182e677e258e0045d42e4d46688743d24faa04ea"
+    },
+    ".github/workflows/ai-nest-verify.yml": {
+      "status": "installed",
+      "sha256": "566b08ec9f2e924a42dceae31935838d7d0a6871115f6bdf5619ac92b2eeb022"
+    },
+    "nest.config.json": {
+      "status": "preserved",
+      "sha256": "ab4a833a96dd92f4cec2c114ce24aa231648abc1c7d11bd24ba7dcb3bfd93f07"
+    },
+    "ai_nest/selftests/test_nest.py": {
+      "status": "installed",
+      "sha256": "227aa6023ac2b1fe3e722bd3b242b22b26bfc48b96f609a2edf46f78602b313f"
+    },
+    "ai_nest/selftests/test_distribution.py": {
+      "status": "installed",
+      "sha256": "31ce41d164fd1d1f76321c07a457d2cdbf1692aa83eebbd9da943551ff651174"
+    },
+    "ai_nest/selftests/test_cli_smoke.py": {
+      "status": "installed",
+      "sha256": "90de0a47903ac8373cb89a1a6ce3fc505ec5bd20f1c9ceae9ba068b2fb06f266"
+    },
+    "ai_nest/selftests/test_verify_runner.py": {
+      "status": "installed",
+      "sha256": "9e9c78df8e687d293648bcae3db6a8bf90e27126c074a9e2d9ce4420dd67fe11"
+    },
+    "ai_nest/selftests/test_cli_e2e.py": {
+      "status": "installed",
+      "sha256": "e3e2de26b79ecfd9aaaed185d149b0dfae77a11d7a8587f7a2e1eda8f7786570"
+    }
+  },
+  "configuration_schema": 2
+}

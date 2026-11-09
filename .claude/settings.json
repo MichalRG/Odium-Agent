@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(scripts/verify.sh)",
+      "Bash(./scripts/verify.sh)",
+      "Bash(bash scripts/verify.sh)"
+    ],
+    "ask": [
+      "Edit(/scripts/verify.sh)",
+      "Edit(/.github/workflows/**)",
+      "Edit(/.claude/settings.json)"
+    ],
+    "deny": [
+      "Bash(git push *)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)"
+    ]
+  }
+}

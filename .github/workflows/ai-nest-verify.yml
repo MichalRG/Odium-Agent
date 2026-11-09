@@ -1,0 +1,48 @@
+name: AI Nest verification
+on:
+  pull_request:
+  merge_group:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Python dependencies when declared
+        shell: bash
+        run: |
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt;
+          elif [ -f requirements.txt ]; then python -m pip install -r requirements.txt;
+          fi
+      - name: Install Node dependencies when declared
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; fi
+          if [ -f frontend/package-lock.json ]; then (cd frontend && npm ci --no-audit --no-fund); fi
+      - name: Test AI Nest runtime
+        shell: bash
+        run: |
+          if [ -d ai_nest/selftests ]; then
+            python -m unittest discover -s ai_nest/selftests -p 'test_*.py' -q
+          fi
+      # This 100-minute ceiling covers inherited 4830-second budgets plus setup overhead.
+      # Lower it to match actual project budgets (or adjust the manifest and limits).
+      # Customize for your actual monorepo / services. The project's verify.config.json
+      # must contain the real checks; setup_commands also run via the CLI.
+      - name: Check base and independently verify
+        shell: bash
+        env:
+          NEST_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          test -n "$NEST_BASE_SHA" || { echo 'Missing base SHA'; exit 2; }
+          python ai_nest/cli.py verify --repo . --base "$NEST_BASE_SHA" --allow-host-execution

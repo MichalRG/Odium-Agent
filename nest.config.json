@@ -1,0 +1,170 @@
+{
+  "version": 2,
+  "verification": {
+    "autodetect": false,
+    "require_project_checks": true,
+    "commands": [
+      {
+        "name": "verify-all",
+        "argv": [
+          "bash",
+          "scripts/verify.sh"
+        ],
+        "cwd": "."
+      }
+    ]
+  },
+  "safety": {
+    "blocked_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "GEMINI.md",
+      "nest.config.json",
+      "ai_nest/",
+      ".agents/",
+      ".claude/",
+      ".github/workflows/",
+      ".gitignore",
+      ".github/",
+      ".cursor/",
+      "scripts/verify.sh",
+      "scripts/verify.py",
+      "scripts/verify.config.json",
+      "scripts/verify.config.json.example",
+      "scripts/security.sh",
+      ".pre-commit-config.yaml",
+      "scripts/",
+      "Makefile",
+      "Dockerfile",
+      "requirements*.txt",
+      "*.lock",
+      "install.py"
+    ],
+    "protected_basenames": [
+      ".ruff.toml",
+      "angular.json",
+      "conftest.py",
+      "jest.config.js",
+      "jest.config.ts",
+      "karma.conf.cjs",
+      "karma.conf.js",
+      "mypy.ini",
+      "package-lock.json",
+      "package.json",
+      "playwright.config.js",
+      "playwright.config.ts",
+      "pnpm-lock.yaml",
+      "poetry.lock",
+      "pyproject.toml",
+      "pytest.ini",
+      "ruff.toml",
+      "setup.cfg",
+      "tox.ini",
+      "tsconfig.json",
+      "tsconfig.spec.json",
+      "uv.lock",
+      "vite.config.ts",
+      "vitest.config.js",
+      "vitest.config.ts",
+      "yarn.lock",
+      "dockerfile",
+      "dockerfile*",
+      "makefile",
+      "requirements*.txt",
+      "requirements.txt"
+    ],
+    "allow_existing_test_modifications": false,
+    "test_path_globs": [
+      "tests/**",
+      "test/**",
+      "**/tests/**",
+      "**/test/**",
+      "**/__tests__/**",
+      "**/e2e/**",
+      "**/integration_tests/**",
+      "test_*.py",
+      "**/test_*.py",
+      "*_test.py",
+      "**/*_test.py",
+      "*.feature",
+      "**/*.feature",
+      "*.spec.ts",
+      "**/*.spec.ts",
+      "*.spec.tsx",
+      "**/*.spec.tsx",
+      "*.test.ts",
+      "**/*.test.ts",
+      "*.test.tsx",
+      "**/*.test.tsx",
+      "*.spec.js",
+      "**/*.spec.js",
+      "*.test.js",
+      "**/*.test.js",
+      "*.spec.jsx",
+      "**/*.spec.jsx",
+      "*.test.jsx",
+      "**/*.test.jsx"
+    ],
+    "allow_new_test_fixtures_in_ci": false
+  },
+  "limits": {
+    "max_repair_attempts": 2,
+    "agent_timeout_seconds": 900,
+    "check_timeout_seconds": 4830
+  },
+  "tdd": {
+    "enabled": true,
+    "protected_tests": false,
+    "red_commands": [
+      {
+        "name": "public-tdd-red",
+        "argv": [
+          "bash",
+          "scripts/verify.sh",
+          "--suite",
+          "unit"
+        ],
+        "cwd": "."
+      }
+    ],
+    "accepted_red_exit_codes": [
+      1,
+      2
+    ],
+    "already_green_policy": "block"
+  },
+  "review_policy": {
+    "blocking_severities": [
+      "critical",
+      "high"
+    ],
+    "skip_recheck_without_protected_tests": true
+  },
+  "routing": {
+    "always_security_review": false,
+    "security_review_patterns": [
+      "*.tf",
+      "*.tfvars",
+      "*auth*",
+      "*security*",
+      "*permission*",
+      "*secret*",
+      "*iam*",
+      "*tenant*",
+      "*middleware*",
+      "*crypt*",
+      "*token*",
+      "*login*",
+      "*payment*",
+      "*migration*",
+      "*.sql"
+    ]
+  },
+  "policy_version": "2026-11",
+  "environment": {
+    "setup_commands": []
+  },
+  "cleanup": {
+    "blocked_worktrees": true
+  }
+}

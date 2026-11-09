@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "required_suites": [
+    "static",
+    "unit",
+    "integration",
+    "build",
+    "security"
+  ],
+  "checks": [
+    {
+      "name": "backend-lint",
+      "suite": "static",
+      "cwd": "backend",
+      "argv": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ]
+    },
+    {
+      "name": "backend-unit",
+      "suite": "unit",
+      "cwd": "backend",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/unit"
+      ]
+    },
+    {
+      "name": "backend-integration",
+      "suite": "integration",
+      "cwd": "backend",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/integration"
+      ]
+    },
+    {
+      "name": "frontend-unit",
+      "suite": "unit",
+      "cwd": "frontend",
+      "argv": [
+        "npm",
+        "run",
+        "test",
+        "--",
+        "--watch=false"
+      ]
+    },
+    {
+      "name": "frontend-build",
+      "suite": "build",
+      "cwd": "frontend",
+      "argv": [
+        "npm",
+        "run",
+        "build"
+      ]
+    },
+    {
+      "name": "backend-dependency-audit",
+      "suite": "security",
+      "cwd": "backend",
+      "argv": [
+        "python",
+        "-m",
+        "pip_audit",
+        "-r",
+        "requirements.txt"
+      ]
+    },
+    {
+      "name": "frontend-dependency-audit",
+      "suite": "security",
+      "cwd": "frontend",
+      "argv": [
+        "npm",
+        "audit",
+        "--audit-level=high"
+      ]
+    },
+    {
+      "name": "backend-smoke",
+      "suite": "smoke",
+      "cwd": "backend",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/smoke"
+      ]
+    }
+  ]
+}

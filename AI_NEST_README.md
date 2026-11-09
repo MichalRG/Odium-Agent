@@ -7,14 +7,31 @@ Provider-independent Python orchestrator for **Codex CLI** and **Claude Code CLI
 Requirements: Python 3.11+, Git, Bash, and one supported provider CLI. **Run generated code only in an isolated, credential-free VM/container.** Git worktrees are not security boundaries.
 
 ```bash
-python /path/to/ai-nest-complete-v4.4/install.py /your/git/repo
-# Or for an older AI Nest:
-python /path/to/ai-nest-complete-v4.4/install.py /your/git/repo --update-code
-cd /your/git/repo
-cp scripts/verify.config.json.example scripts/verify.config.json
+# Recommended: local install, nothing is added to the project's Git history
+python /path/to/odium-agent/install.py /your/git/repo --local --template python
+# Committed install (Nest files are committed, CI workflow included):
+python /path/to/odium-agent/install.py /your/git/repo --template python
+# Upgrade either kind (repeat --local for a local install):
+python /path/to/odium-agent/install.py /your/git/repo --update-code
 ```
 
-Edit `scripts/verify.config.json` to list **real** unit, integration, static, build, and security commands. Do not accept the example without matching the project. `nest.config.json` must contain `verification.commands=[{"name":"verify-all","argv":["bash","scripts/verify.sh"],"cwd":"."}]` and the safety protections in the supplied v4.4 config.
+**Local install (`--local`).** The installer lists every Nest file in `.git/info/exclude` (a per-clone ignore file that is never committed) and never modifies files the project tracks: an existing `AGENTS.md`, `CLAUDE.md`, `.gitignore` or `.claude/settings.json` is left as it is. `git status` stays clean, so there is nothing to commit. The orchestrator copies its trusted files (`scripts/verify.*`, `nest.config.json`, instruction files) into every worktree and blocks an agent stage that changes or deletes them, because Git cannot see edits to excluded files. Limits: the Nest exists only in this clone (each developer or container installs it), there is no AI Nest CI job, and to commit a file of your own at an excluded path (for example a new `AGENTS.md`) use `git add -f` or remove its line from the `AI Nest local install` block. To uninstall, delete the files listed in that block and the block itself.
+
+**Verify templates (`--template`).** Writes `scripts/verify.config.json` from `ai_nest/templates/verify/<name>.json`; an existing file is kept unless `--force`. Then edit commands and `cwd` for your layout (for example `backend/`, `frontend/`).
+
+| Template | Checks | Notes |
+|---|---|---|
+| `python` | `ruff check .`, `pytest -q tests` | needs ruff and pytest in the active environment |
+| `java-maven` | `mvn -B -ntp test`, `mvn -DskipTests package` | Maven downloads dependencies itself |
+| `java-gradle` | `./gradlew test`, `./gradlew assemble` | uses the project's Gradle wrapper |
+| `typescript` | `tsc --noEmit`, `npm test`, `npm run build` | also adds `npm ci` to `environment.setup_commands` |
+| `angular` | `npm test -- --watch=false`, `ng build` | adds `npm ci`; Karma needs a headless browser in containers |
+| `go` | `go vet ./...`, `go test ./...`, `go build ./...` | |
+| `dotnet` | `dotnet build`, `dotnet test` | |
+
+Every template has a `unit` suite, which `tdd.red_commands` runs for the RED step. Build and dependency files (`pom.xml`, Gradle/Maven wrappers, `go.mod`, `*.csproj`, `package.json`, `pyproject.toml`, lint configs) are protected from coding agents.
+
+Without a template, copy `scripts/verify.config.json.example` to `scripts/verify.config.json`. Edit it to list **real** unit, integration, static, build, and security commands. Do not accept the example without matching the project. `nest.config.json` must contain `verification.commands=[{"name":"verify-all","argv":["bash","scripts/verify.sh"],"cwd":"."}]` and the safety protections in the supplied v4.4 config.
 
 **Upgrade policy:** The installer includes a versioned `ai_nest/installation.json` inventory (tracked in Git), the installer itself, and runtime regression tests under `ai_nest/selftests/`. On `--update-code`, supported v1/v2 configurations are backed up and migrated without replacing your real project checks. Missing safety protections are merged; unsupported configurations are left untouched. If `tdd.protected_tests` was enabled, the upgrade disables it until a genuinely isolated test runner exists. The installer also reconciles known obsolete AI Nest instructions, while preserving custom project rules and backing up modified documents. It adjusts outer verification timeouts to cover **declared check budgets** when the actual manifest exists. After upgrade, re-run `doctor`, review and commit changed files. The install manifest supports drift diagnostics but is **not a security boundary**.
 

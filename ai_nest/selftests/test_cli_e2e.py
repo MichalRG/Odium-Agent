@@ -66,6 +66,10 @@ elif '# Role: coder —' in prompt:
         (base/'calcx.py').write_text('def add(a,b):\n    return a+b\n')
     elif scenario == 'coder_nested_helper_edit' and '# Role: coder —' in prompt:
         (base/'tests/unit/helpers.py').write_text('VALUE = 999\n')
+    elif scenario == 'coder_local_gate_edit':
+        # Excluded from Git, so only the orchestrator's hash check can see this.
+        (base/'scripts/verify.config.json').write_text('{"version":1,"checks":[{"name":"x","suite":"unit","argv":["true"]}]}')
+        (base/'calc.py').write_text('def add(a,b):\n    return a+b\n')
     elif scenario == 'coder_test_edit':
         (base/'tests/test_feature.py').write_text('assert True\n')
     elif scenario == 'coder_protected_edit':
@@ -98,14 +102,14 @@ Path(args[args.index('--output-last-message') + 1]).write_text(output)
 
 
 class EndToEndTests(unittest.TestCase):
-    def run_scenario(self, scenario):
+    def run_scenario(self, scenario, local=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'project'
             root.mkdir()
             self.assertEqual(cmd(root, 'git', 'init', '-q').returncode, 0)
             cmd(root, 'git', 'config', 'user.email', 'test@example.invalid')
             cmd(root, 'git', 'config', 'user.name', 'Test')
-            self.assertEqual(cmd(root, sys.executable, str(ROOT / 'install.py'), str(root)).returncode, 0)
+            self.assertEqual(cmd(root, sys.executable, str(ROOT / 'install.py'), str(root), *(['--local'] if local else [])).returncode, 0)
             (root / 'calc.py').write_text('def add(a,b):\n    return 0\n')
             (root / 'tests').mkdir()
             (root / 'tests/test_existing.py').write_text(
@@ -133,12 +137,15 @@ class EndToEndTests(unittest.TestCase):
             reports = list((root/'.ai-nest/runs').glob('*/report.json'))
             self.assertEqual(len(reports), 1, p.stdout + p.stderr)
             report = json.loads(reports[0].read_text())
-            if scenario in ('happy','coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit','red_new_module','new_fixture','new_nested_fixture','coder_nested_helper_edit'):
+            if scenario in ('happy','coder_local_gate_edit','coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit','red_new_module','new_fixture','new_nested_fixture','coder_nested_helper_edit'):
                 self.assertEqual(p.returncode, 0, p.stdout+p.stderr)
                 self.assertEqual(report['status'],'verified')
-                self.assertEqual(report['attempts'], 2 if scenario in ('coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit') else 1)
+                self.assertEqual(report['attempts'], 2 if scenario in ('coder_local_gate_edit','coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit') else 1)
                 if scenario == 'happy':
                     self.assertIn('verification_optimizations', report)
+                if local:
+                    self.assertEqual(cmd(root, 'git', 'status', '--porcelain').stdout, '')
+                    self.assertNotIn('ai_nest/cli.py', cmd(root, 'git', 'ls-tree', '-r', '--name-only', report['branch']).stdout)
                 if scenario == 'coder_commit':
                     # Branch history must remain pinned to the trusted original commit.
                     branch_sha = cmd(root, 'git','rev-parse', report['branch']).stdout.strip()
@@ -165,6 +172,8 @@ class EndToEndTests(unittest.TestCase):
         self.run_scenario('coder_nested_helper_edit')
 
     def test_happy_path(self): self.run_scenario('happy')
+    def test_local_install_happy_path(self): self.run_scenario('happy', local=True)
+    def test_local_install_blocks_coder_gate_tampering(self): self.run_scenario('coder_local_gate_edit', local=True)
     def test_invalid_red_blocked(self): self.run_scenario('red_invalid')
     def test_missing_symbol_red_accepted_then_blocked_by_missing_implementation(self): self.run_scenario('red_symbol')
     def test_coder_modifies_public_test_then_repairs(self): self.run_scenario('coder_test_edit')

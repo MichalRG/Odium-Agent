@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "required_suites": [
+    "unit",
+    "build"
+  ],
+  "checks": [
+    {
+      "name": "unit",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "test"
+      ],
+      "timeout_seconds": 1200
+    },
+    {
+      "name": "package",
+      "suite": "build",
+      "cwd": ".",
+      "argv": [
+        "mvn",
+        "-B",
+        "-ntp",
+        "-DskipTests",
+        "package"
+      ],
+      "timeout_seconds": 900
+    }
+  ]
+}

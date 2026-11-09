@@ -187,7 +187,8 @@ class NestTests(unittest.TestCase):
             kwargs = dict(public_tree=repo, public_files=['tests/test_wf.py'], planned_files=['app/wordfreq.py'])
             result = {'checks': [{'name': 'unit', 'exit_code': 1, 'stderr_tail': '',
                                   'stdout_tail': "tests/test_wf.py\nModuleNotFoundError: No module named 'app.wordfreq'"}]}
-            for name in ('test_count (test_wf.T)', 'test_count (test_wf.T.test_count)', 'tests/test_wf.py::T::test_count'):
+            for name in ('test_count (test_wf.T)', 'test_count (test_wf.T.test_count)', 'tests/test_wf.py::T::test_count',
+                         'test_wf.T.test_count', 'demo.T#test_count', 'tests/test_wf.py::T::test_count[1.5]'):
                 self.assertEqual(nest.validate_red_result(result, [name], **kwargs), 'expected_red')
             with self.assertRaisesRegex(nest.Blocked, 'not found in the generated test files'):
                 nest.validate_red_result(result, ['test_missing (test_wf.T)'], **kwargs)
@@ -195,6 +196,23 @@ class NestTests(unittest.TestCase):
         result = {'checks': [{'name': 'unit', 'exit_code': 1, 'stdout_head': 'test_add (tests.T.test_add) ... FAIL',
                               'stdout_tail': 'AssertionError: 1 != 2', 'stderr_tail': ''}]}
         self.assertEqual(nest.validate_red_result(result, ['test_add (tests.T)']), 'expected_red')
+
+    def test_red_accepts_new_symbol_errors_from_java_go_and_csharp(self):
+        cases = [('src/test/java/CalcTest.java', 'class CalcTest { @Test void testAdd() { new Calc(); } }', 'testAdd',
+                  '[ERROR] /x/src/test/java/CalcTest.java:[1,40] cannot find symbol\n[ERROR]   symbol:   class Calc'),
+                 ('calc_test.go', 'func TestAdd(t *testing.T) { Add(1, 2) }', 'TestAdd', './calc_test.go:1:31: undefined: Add'),
+                 ('Calc.Tests/CalcTests.cs', 'public void TestAdd() { Calc.Add(1, 2); }', 'TestAdd',
+                  "Calc.Tests/CalcTests.cs(1,25): error CS0103: The name 'Calc' does not exist in the current context")]
+        for name, source, test, log in cases:
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / name).parent.mkdir(parents=True, exist_ok=True)
+                (Path(tmp) / name).write_text(source)
+                kwargs = dict(public_tree=Path(tmp), public_files=[name])
+                result = {'checks': [{'name': 'unit', 'exit_code': 1, 'stdout_tail': log, 'stderr_tail': ''}]}
+                self.assertEqual(nest.validate_red_result(result, [test], **kwargs), 'expected_red', name)
+                result['checks'][0]['stdout_tail'] = log.replace('Add', 'Unrelated').replace('Calc', 'Unrelated')
+                with self.assertRaises(nest.Blocked, msg=name):
+                    nest.validate_red_result(result, [test], **kwargs)
 
     def test_typescript_new_module_allowed_only_if_planned(self):
         with tempfile.TemporaryDirectory() as tmp:

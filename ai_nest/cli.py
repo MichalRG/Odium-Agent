@@ -385,6 +385,38 @@ def get_patch(repo: Path, out: Path, cfg: dict, test_only: bool = False,
     out.write_text(p.stdout, encoding='utf-8')
     return [f for f in files if f not in (public_files or [])]
 
+# Nest files a local install (install.py --local) keeps out of Git. Worktrees are built from
+# commits, so they need trusted copies; Git cannot see agent edits to them, so they are hash-checked.
+LOCAL_OVERLAY = ('scripts/verify.sh', 'scripts/verify.py', 'scripts/verify.config.json', 'nest.config.json',
+                 'AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'AI_NEST_README.md', '.claude/settings.json',
+                 '.github/copilot-instructions.md')
+
+
+def main_checkout(tree: Path) -> Path:
+    return Path(git(tree, 'rev-parse', '--path-format=absolute', '--git-common-dir')).parent
+
+
+def local_overlay_files(source: Path) -> list[str]:
+    present = [name for name in LOCAL_OVERLAY if (source / name).is_file()]
+    tracked = set(git(source, 'ls-files', '--', *present).splitlines()) if present else set()
+    return [name for name in present if name not in tracked]
+
+
+def overlay_local_files(tree: Path) -> None:
+    source = main_checkout(tree)
+    for name in local_overlay_files(source):
+        (tree / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / name, tree / name)
+
+
+def assert_local_files_intact(tree: Path, stage: str) -> None:
+    source = main_checkout(tree)
+    changed = [name for name in local_overlay_files(source)
+               if not (tree / name).is_file() or (tree / name).read_bytes() != (source / name).read_bytes()]
+    if changed:
+        raise Blocked(f'Agent {stage} modified local AI Nest files: {changed}')
+
+
 def checkout_worktree(source: Path, location: Path, branch: str | None = None) -> None:
     location.parent.mkdir(parents=True, exist_ok=True)
     argv = ['worktree', 'add']
@@ -394,6 +426,7 @@ def checkout_worktree(source: Path, location: Path, branch: str | None = None) -
         argv.append('--detach')
     argv.extend([str(location), 'HEAD'])
     git(source, *argv)
+    overlay_local_files(location)
 
 
 def remove_worktree(source: Path, location: Path) -> None:
@@ -543,6 +576,7 @@ def agent_stage(provider: CLIProvider, session: SessionStore, stage: str,
     before = git(workspace, 'status', '--porcelain') if not write else None
     head_before = git(workspace, 'rev-parse', 'HEAD')
     result = parse_result(stage, provider.run(stage, workspace, augmented, write=write))
+    assert_local_files_intact(workspace, stage)
     if git(workspace, 'rev-parse', 'HEAD') != head_before:
         raise Blocked(f'Agent {stage} moved HEAD; commits/rebases are not allowed inside stages')
     if not write and git(workspace, 'status', '--porcelain') != before:
@@ -631,10 +665,13 @@ def safe_failure_feedback(validation: dict, *, protected: bool = True) -> dict:
 
 
 def red_test_key(name: str) -> str:
-    """Runners print 'test_x (mod.Class)' (unittest) or 'path::Class::test_x[p]' (pytest); sources define test_x."""
+    """Runner ids ('test_x (mod.Class)', 'path::Class::test_x[p]', 'pkg.Class#test_x') -> test_x as sources define it."""
     name = name.strip()
     m = re.match(r'([A-Za-z_]\w*) \(', name)
-    return m.group(1) if m else name.rsplit('::', 1)[-1].split('[', 1)[0]
+    if m:
+        return m.group(1)
+    name = name.rsplit('::', 1)[-1].split('[', 1)[0]
+    return re.split(r'[.#]', name)[-1] if re.fullmatch(r'[\w.$#]+', name) else name
 
 
 def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | None = None,
@@ -671,6 +708,9 @@ def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | 
         r"has no attribute ['\"]([A-Za-z_]\w*)['\"]",
         r"has no exported member ['\"]([A-Za-z_]\w*)['\"]",
         r"Property ['\"]([A-Za-z_]\w*)['\"] does not exist",
+        r"symbol:\s+(?:class|interface|enum|record|method|variable)\s+([A-Za-z_]\w*)",  # javac
+        r"undefined: ([A-Za-z_]\w*)",  # go
+        r"The (?:type or namespace )?name '([A-Za-z_]\w*)'",  # C#
     )
     missing_module_patterns = (
         r"No module named ['\"]([^'\"\s]+)['\"]",
@@ -730,6 +770,7 @@ def checkout_reset(repo: Path, base_commit: str, public_patch: Path | None = Non
     """Restore the original trusted commit, even if an agent moved HEAD."""
     git(repo, 'reset', '--hard', base_commit)
     git(repo, 'clean', '-fd')  # ONLY in a disposable worker worktree
+    overlay_local_files(repo)
     if public_patch is not None:
         apply_patch(repo, public_patch)
     if git(repo, 'rev-parse', 'HEAD') != base_commit:
@@ -1004,6 +1045,11 @@ def doctor(repo: Path, provider: str) -> int:
     cfg = read_config(repo)
     issues = installation_diagnostics(repo)
     print(f'AI Nest runtime: {NEST_RELEASE}')
+    try:
+        mode = json.loads((repo / 'ai_nest' / 'installation.json').read_text(encoding='utf-8')).get('mode', 'committed')
+    except (OSError, ValueError):
+        mode = 'unknown'
+    print(f'Install mode: {mode}' + (' (Nest files excluded from Git via .git/info/exclude)' if mode == 'local' else ''))
     for issue in issues:
         print(f'NOT READY: {issue}')
     print(f'Repository: {repo}')

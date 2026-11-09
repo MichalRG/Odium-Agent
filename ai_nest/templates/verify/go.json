@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "required_suites": [
+    "static",
+    "unit",
+    "build"
+  ],
+  "checks": [
+    {
+      "name": "vet",
+      "suite": "static",
+      "cwd": ".",
+      "argv": [
+        "go",
+        "vet",
+        "./..."
+      ],
+      "timeout_seconds": 300
+    },
+    {
+      "name": "unit",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "build",
+      "suite": "build",
+      "cwd": ".",
+      "argv": [
+        "go",
+        "build",
+        "./..."
+      ],
+      "timeout_seconds": 600
+    }
+  ]
+}

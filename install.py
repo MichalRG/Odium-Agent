@@ -27,6 +27,8 @@ FILES = [
     'scripts/verify.config.json.example',
     '.github/workflows/ai-nest-verify.yml',
     'nest.config.json',
+    '.claude/settings.json',
+    *[str(p.relative_to(SOURCE)) for p in sorted((SOURCE / 'ai_nest' / 'templates' / 'verify').glob('*.json'))],
     # Keep the runtime's regression suite available in the installed project.
     # Do not inject these tests into the application's own test directories.
     *[f'ai_nest/selftests/{p.name}' for p in SELFTEST_SOURCE.glob('test_*.py')],
@@ -37,6 +39,55 @@ BRIDGES = {
     'GEMINI.md': '\n\n# AI Engineering Nest\n\n@./AGENTS.md\n',
     '.github/copilot-instructions.md': '\n\n# AI Engineering Nest\n\nFollow AGENTS.md and AI_NEST_README.md. Do not claim verification without successful independent checks.\n',
 }
+
+
+TEMPLATES = sorted(p.stem for p in (SOURCE / 'ai_nest' / 'templates' / 'verify').glob('*.json'))
+# Paths a local install keeps out of Git (anchored, so same-named files in subfolders are unaffected).
+LOCAL_EXCLUDES = ['/.ai-nest/', '/ai_nest/', '/install.py', '/nest.config.json', '/AI_NEST_README.md',
+                  '/scripts/verify.sh', '/scripts/verify.py', '/scripts/verify.config.json',
+                  '/scripts/verify.config.json.example', '/.agents/skills/build-feature/',
+                  '/.claude/skills/build-feature/', '/.claude/settings.json', '/AGENTS.md', '/CLAUDE.md',
+                  '/GEMINI.md', '/.github/copilot-instructions.md']
+EXCLUDE_BEGIN, EXCLUDE_END = '# >>> AI Nest local install (managed by install.py) >>>', '# <<< AI Nest local install <<<'
+
+
+def tracked_files(dst: Path) -> set[str]:
+    p = subprocess.run(['git', 'ls-files', '-z'], cwd=dst, capture_output=True, text=True)
+    return set(filter(None, p.stdout.split('\0')))
+
+
+def write_local_excludes(dst: Path, tracked: set[str]) -> Path:
+    """Hide Nest files via .git/info/exclude: local to this clone, never committed."""
+    out = subprocess.run(['git', 'rev-parse', '--git-path', 'info/exclude'], cwd=dst,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    path = Path(out) if Path(out).is_absolute() else dst / out
+    entries = [e for e in LOCAL_EXCLUDES if e.strip('/') not in tracked]
+    block = '\n'.join([EXCLUDE_BEGIN, *entries, EXCLUDE_END])
+    old = path.read_text(encoding='utf-8') if path.is_file() else ''
+    pattern = re.compile(re.escape(EXCLUDE_BEGIN) + '.*?' + re.escape(EXCLUDE_END), re.S)
+    new = pattern.sub(lambda _: block, old) if pattern.search(old) else old.rstrip('\n') + ('\n\n' if old.strip() else '') + block + '\n'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new, encoding='utf-8')
+    return path
+
+
+def apply_template(dst: Path, name: str, force: bool) -> None:
+    target = dst / 'scripts' / 'verify.config.json'
+    if target.exists() and not force:
+        print(f'Template {name}: scripts/verify.config.json already exists; left unchanged.')
+        return
+    data = json.loads((SOURCE / 'ai_nest' / 'templates' / 'verify' / f'{name}.json').read_text(encoding='utf-8'))
+    setup = data.pop('nest_setup_commands', [])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+    print(f'Template {name}: wrote scripts/verify.config.json; edit commands and cwd for your layout.')
+    cfg_path = dst / 'nest.config.json'
+    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    env = cfg.setdefault('environment', {})
+    if setup and not env.get('setup_commands'):
+        env['setup_commands'] = setup  # fresh worktrees have no node_modules
+        cfg_path.write_text(json.dumps(cfg, indent=2) + '\n', encoding='utf-8')
+        print('  Added environment.setup_commands: ' + ', '.join(s['name'] for s in setup))
 
 
 def sha256_file(path: Path) -> str:
@@ -123,12 +174,12 @@ def report_legacy_files(dst: Path) -> list[str]:
     if examples.is_dir():
         notes.append('WARNING: examples/ exists; not deleted because ownership is unknown')
     settings = dst / '.claude/settings.json'
-    if settings.exists():
+    if settings.exists() and '"coder"' in settings.read_text(encoding='utf-8', errors='replace'):
         notes.append('WARNING: .claude/settings.json exists; review hooks for legacy subagents (not deleted)')
     return notes
 
 
-def write_installation_manifest(dst: Path, installed: list[str], preserved: list[str]) -> Path:
+def write_installation_manifest(dst: Path, installed: list[str], preserved: list[str], mode: str = 'committed') -> Path:
     """Diagnostic integrity manifest, not a security boundary against agents."""
     relative_files = [name for name in FILES if (dst / name).is_file()]
     statuses = {}
@@ -137,7 +188,7 @@ def write_installation_manifest(dst: Path, installed: list[str], preserved: list
                           'sha256': sha256_file(dst / name)}
     path = dst / 'ai_nest' / 'installation.json'
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({'release': RELEASE, 'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
+    path.write_text(json.dumps({'release': RELEASE, 'mode': mode, 'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
                                 'files': statuses, 'configuration_schema': 2}, indent=2) + '\n', encoding='utf-8')
     return path
 
@@ -210,18 +261,26 @@ def migrate_existing_config(dst: Path) -> None:
         print('WARNING: protected_tests=true is not confidential without isolated containers.')
 
 
-def install(dst: Path, force: bool = False, update_code: bool = False) -> None:
+def install(dst: Path, force: bool = False, update_code: bool = False, local: bool = False,
+            template: str | None = None) -> None:
     dst = dst.resolve()
     if not (dst / '.git').exists() and subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=dst, capture_output=True).returncode:
         raise RuntimeError('Destination must be an existing Git repository')
     if dst == SOURCE:
         raise RuntimeError('Source and destination cannot be the same folder')
     installed, preserved = [], []
+    # Local mode never writes a file the project tracks.
+    tracked = tracked_files(dst) if local else set()
     updatable = ('ai_nest/', '.agents/skills/', '.claude/skills/')
     updatable_files = {'scripts/verify.sh', 'scripts/verify.py', 'install.py'}
     for name in FILES:
         source = SOURCE / name
         target = dst / name
+        if local and name == '.github/workflows/ai-nest-verify.yml':
+            continue  # CI checkouts cannot see an uncommitted Nest
+        if name in tracked:
+            preserved.append(name)
+            continue
         replace_on_update = (name.startswith(updatable) or name in updatable_files
                              or name == '.github/workflows/ai-nest-verify.yml')
         if target.exists() and not force and not (update_code and replace_on_update):
@@ -241,11 +300,12 @@ def install(dst: Path, force: bool = False, update_code: bool = False) -> None:
         installed.append(name)
     if update_code and not force:
         migrate_existing_config(dst)
-        installed.extend(migrate_old_instructions(dst))
-        for note in report_legacy_files(dst):
-            print(note)
+        if not local:  # these edit project instruction files
+            installed.extend(migrate_old_instructions(dst))
+            for note in report_legacy_files(dst):
+                print(note)
     doc = dst / 'AI_NEST_README.md'
-    if not doc.exists() or force or update_code:
+    if 'AI_NEST_README.md' not in tracked and (not doc.exists() or force or update_code):
         shutil.copy2(SOURCE / ('README.md' if (SOURCE / 'README.md').is_file() else 'AI_NEST_README.md'), doc)
         installed.append('AI_NEST_README.md')
     for name, bridge in BRIDGES.items():
@@ -254,7 +314,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False) -> None:
         if not target.exists():
             shutil.copy2(SOURCE / name, target)
             installed.append(name)
-        elif 'AI Engineering Nest' not in target.read_text(encoding='utf-8'):
+        elif not local and 'AI Engineering Nest' not in target.read_text(encoding='utf-8'):
             with target.open('a', encoding='utf-8') as f:
                 f.write(bridge)
             installed.append(f'{name} (appended)')
@@ -266,19 +326,24 @@ def install(dst: Path, force: bool = False, update_code: bool = False) -> None:
         if '.claude/agents/' in text or 'New behavior gets a test' in text:
             print('WARNING: CLAUDE.md may contain obsolete agent/test ownership instructions.')
             print('  Review against AGENTS.md; coder should not be instructed to modify tests.')
+    if template:
+        apply_template(dst, template, force)
     ignores = dst / '.gitignore'
     lines = ignores.read_text(encoding='utf-8').splitlines() if ignores.exists() else []
     wanted = ['.ai-nest/', '__pycache__/', '*.pyc', '.pytest_cache/', '.DS_Store', 'node_modules/', 'dist/', 'build/', 'coverage/']
     missing = [rule for rule in wanted if rule not in lines]
-    if missing:
+    if local:
+        exclude = write_local_excludes(dst, tracked)
+        installed.append(f'{exclude.relative_to(dst) if exclude.is_relative_to(dst) else exclude} (AI Nest block)')
+    elif missing:
         with ignores.open('a', encoding='utf-8') as f:
             f.write(('\n' if lines else '') + '\n'.join(missing) + '\n')
         installed.append('.gitignore (appended)')
     # The legacy .ai-nest/installation.json is ignored and cannot survive cloning.
     # Keep it in place as a historical diagnostic, but write the active manifest
     # into the tracked ai_nest/ directory.
-    manifest_path = write_installation_manifest(dst, installed, preserved)
-    print(f'Installation manifest (commit this file): {manifest_path}')
+    manifest_path = write_installation_manifest(dst, installed, preserved, 'local' if local else 'committed')
+    print(f'Installation manifest: {manifest_path}' + ('' if local else ' (commit this file)'))
     print('Installed/updated:')
     for name in installed:
         print('  +', name)
@@ -289,10 +354,15 @@ def install(dst: Path, force: bool = False, update_code: bool = False) -> None:
     manifest = dst / 'scripts' / 'verify.config.json'
     if not manifest.is_file():
         print('\nACTION REQUIRED: scripts/verify.config.json is not configured.')
+        print(f'  rerun with --template {{{",".join(TEMPLATES)}}}, or:')
         print('  cp scripts/verify.config.json.example scripts/verify.config.json')
         print('  Edit checks and required_suites for your project; no tests are assumed to pass.')
-    print('\nNext: configure real project checks and setup commands, review policy, commit, then run:')
-    print('  git add -A && git diff --cached --stat  # REVIEW before committing')
+    if local:
+        print('\nLocal install: Nest files are listed in .git/info/exclude, so git status stays clean and nothing is committed.')
+        print('Next: configure real project checks, then run:')
+    else:
+        print('\nNext: configure real project checks and setup commands, review policy, commit, then run:')
+        print('  git add -A && git diff --cached --stat  # REVIEW before committing')
     print('  bash scripts/verify.sh --list')
     print('  python ai_nest/cli.py doctor --provider codex')
 
@@ -303,11 +373,14 @@ def main():
     p.add_argument('--force', action='store_true', help='Replace AI Nest core/config files (never replaces existing instruction bridges)')
     p.add_argument('--update-code', action='store_true',
                    help='Upgrade runtime, skills, verifier and docs; migrate supported v1 config with a backup, preserve other settings and instructions')
+    p.add_argument('--local', action='store_true',
+                   help='Keep AI Nest out of the project history: list its files in .git/info/exclude and never modify tracked files')
+    p.add_argument('--template', choices=TEMPLATES, help='Write scripts/verify.config.json from a stack template')
     args = p.parse_args()
     if not args.repository.is_dir():
         p.error('Directory does not exist')
     try:
-        install(args.repository, args.force, args.update_code)
+        install(args.repository, args.force, args.update_code, args.local, args.template)
         return 0
     except (RuntimeError, OSError) as ex:
         print(f'Installation blocked: {ex}', file=sys.stderr)

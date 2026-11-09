@@ -1,10 +1,11 @@
 {
   "release": "4.4",
-  "generated_at": "2026-11-09T20:42:50.936444+00:00",
+  "mode": "committed",
+  "generated_at": "2026-11-09T21:28:03.739386+00:00",
   "files": {
     "ai_nest/cli.py": {
       "status": "installed",
-      "sha256": "85dad8411a1900579f5f6cedefff6f279b0494c089856f3b4023e06996a6581f"
+      "sha256": "7a0497711dc012b8c3bce1c032f89cabc00f8e70bef8302b75d31a6eacc78981"
     },
     "ai_nest/memory.py": {
       "status": "installed",
@@ -12,7 +13,7 @@
     },
     "install.py": {
       "status": "installed",
-      "sha256": "ae21c4977e04fe7e0d9ab900f4e96208af22c96f8d702399ade435b638c0a4c1"
+      "sha256": "eb8ed1f199fedb8800fb06d4057f071b4bdf1c4aae260ffb69c53b06029bf566"
     },
     "ai_nest/prompts/explore.md": {
       "status": "installed",
@@ -52,11 +53,11 @@
     },
     ".agents/skills/build-feature/SKILL.md": {
       "status": "installed",
-      "sha256": "4f17caf0f5bc03db935d891bf70be0f7e2843a59e613a74c9c22fae72a89e297"
+      "sha256": "eb6db3578de9d8e3672358389075b65b5bbe097904813e48607664ccae76076d"
     },
     ".claude/skills/build-feature/SKILL.md": {
       "status": "installed",
-      "sha256": "4f17caf0f5bc03db935d891bf70be0f7e2843a59e613a74c9c22fae72a89e297"
+      "sha256": "eb6db3578de9d8e3672358389075b65b5bbe097904813e48607664ccae76076d"
     },
     "scripts/verify.sh": {
       "status": "installed",
@@ -71,20 +72,52 @@
       "sha256": "ae4ba6b31e694ca417981669182e677e258e0045d42e4d46688743d24faa04ea"
     },
     ".github/workflows/ai-nest-verify.yml": {
-      "status": "installed",
+      "status": "preserved",
       "sha256": "566b08ec9f2e924a42dceae31935838d7d0a6871115f6bdf5619ac92b2eeb022"
     },
     "nest.config.json": {
       "status": "preserved",
-      "sha256": "ab4a833a96dd92f4cec2c114ce24aa231648abc1c7d11bd24ba7dcb3bfd93f07"
+      "sha256": "96304f02333690fa77d45597042b283b2a0376776a9692687ae848b90debfa83"
+    },
+    ".claude/settings.json": {
+      "status": "preserved",
+      "sha256": "78b8d8927250014870dba834d855525eed2f50978cab4b5095efea4521c2bc20"
+    },
+    "ai_nest/templates/verify/angular.json": {
+      "status": "installed",
+      "sha256": "d7049008b4c5d779c3994d7872406475865fd3e8317b97ed1de1a09f61575422"
+    },
+    "ai_nest/templates/verify/dotnet.json": {
+      "status": "installed",
+      "sha256": "1f83c2c9c4571dfd42bcfe9742de037808d79e79a48a911f678f28ddbbd64fd5"
+    },
+    "ai_nest/templates/verify/go.json": {
+      "status": "installed",
+      "sha256": "6b7e25419a0f864e2586a9cd2e1b7f52407507a4927fa388f6c31885d3ccd46b"
+    },
+    "ai_nest/templates/verify/java-gradle.json": {
+      "status": "installed",
+      "sha256": "3cd92bc5ca37ed6cfd29788a45a3af2b73a343d7fea0833b5288c1475a4d260c"
+    },
+    "ai_nest/templates/verify/java-maven.json": {
+      "status": "installed",
+      "sha256": "34047c7abd3c68ee0e39fa8295328cf3a9721a00bf13080a4b9de380f5bb192d"
+    },
+    "ai_nest/templates/verify/python.json": {
+      "status": "installed",
+      "sha256": "12f293601f2223f2bf8b2fd05e3ceb69dbf727acbecaf9d0f99793274a31584f"
+    },
+    "ai_nest/templates/verify/typescript.json": {
+      "status": "installed",
+      "sha256": "99ffc5e47e3634754ec23935c3057e55a2cd631018224ac5a3c266fe9e3369d5"
     },
     "ai_nest/selftests/test_nest.py": {
       "status": "installed",
-      "sha256": "227aa6023ac2b1fe3e722bd3b242b22b26bfc48b96f609a2edf46f78602b313f"
+      "sha256": "4b0fdaab2d05375281e699910b80e19f3279d34a4b89e342834d6e7f1fdc5dbd"
     },
     "ai_nest/selftests/test_distribution.py": {
       "status": "installed",
-      "sha256": "31ce41d164fd1d1f76321c07a457d2cdbf1692aa83eebbd9da943551ff651174"
+      "sha256": "9835f6292f262b52e544e60a846ada3271044b27fef41a21c9be8f724aa34a5f"
     },
     "ai_nest/selftests/test_cli_smoke.py": {
       "status": "installed",
@@ -96,7 +129,7 @@
     },
     "ai_nest/selftests/test_cli_e2e.py": {
       "status": "installed",
-      "sha256": "e3e2de26b79ecfd9aaaed185d149b0dfae77a11d7a8587f7a2e1eda8f7786570"
+      "sha256": "19b81ccfe67ce6995d88ee7af7e9bb9b96ae6cfbb883bf5651426cbe5f5c2960"
     }
   },
   "configuration_schema": 2

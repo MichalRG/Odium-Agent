@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "required_suites": [
+    "unit",
+    "build"
+  ],
+  "checks": [
+    {
+      "name": "build",
+      "suite": "build",
+      "cwd": ".",
+      "argv": [
+        "dotnet",
+        "build",
+        "--nologo"
+      ],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "unit",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "dotnet",
+        "test",
+        "--nologo"
+      ],
+      "timeout_seconds": 1200
+    }
+  ]
+}

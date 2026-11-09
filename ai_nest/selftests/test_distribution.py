@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -308,3 +309,58 @@ class V2SafetyMigrationTests(unittest.TestCase):
             self.assertNotIn('test_path_markers', new['safety'])
             self.assertNotIn('**/*.spec.*', new['safety']['test_path_globs'])
             self.assertTrue(list((repo/'.ai-nest/config-backups').glob('nest.config.*.json')))
+
+
+class LocalInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / 'project'
+        self.repo.mkdir()
+        for args in (('init', '-q'), ('config', 'user.email', 't@example.invalid'), ('config', 'user.name', 't')):
+            command(self.repo, 'git', *args)
+        (self.repo / 'AGENTS.md').write_text('# Team rules\n')
+        (self.repo / '.gitignore').write_text('node_modules/\n')
+        command(self.repo, 'git', 'add', '-A')
+        command(self.repo, 'git', 'commit', '-qm', 'base')
+
+    def install(self, *extra):
+        p = command(self.repo, sys.executable, str(ROOT / 'install.py'), str(self.repo), '--local', *extra)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+
+    def test_local_install_leaves_git_clean_and_tracked_files_untouched(self):
+        self.install('--template', 'python')
+        self.install('--update-code')
+        self.assertEqual(command(self.repo, 'git', 'status', '--porcelain').stdout, '')
+        self.assertEqual((self.repo / 'AGENTS.md').read_text(), '# Team rules\n')
+        self.assertEqual((self.repo / '.gitignore').read_text(), 'node_modules/\n')
+        self.assertTrue((self.repo / 'ai_nest/cli.py').is_file())
+        self.assertFalse((self.repo / '.github/workflows/ai-nest-verify.yml').exists())
+        exclude = (self.repo / '.git/info/exclude').read_text()
+        self.assertEqual(exclude.count('AI Nest local install (managed'), 1)
+        self.assertNotIn('/AGENTS.md\n', exclude)
+        self.assertEqual(json.loads((self.repo / 'ai_nest/installation.json').read_text())['mode'], 'local')
+        listed = command(self.repo, 'bash', 'scripts/verify.sh', '--list')
+        self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
+
+    def test_node_template_adds_dependency_setup(self):
+        self.install('--template', 'angular')
+        cfg = json.loads((self.repo / 'nest.config.json').read_text())
+        self.assertEqual(cfg['environment']['setup_commands'][0]['argv'][:2], ['npm', 'ci'])
+        self.assertNotIn('nest_setup_commands', json.loads((self.repo / 'scripts/verify.config.json').read_text()))
+
+    def test_every_template_is_a_valid_manifest_with_a_unit_suite(self):
+        limit = json.loads((ROOT / 'nest.config.json').read_text())['limits']['check_timeout_seconds']
+        (self.repo / 'scripts').mkdir()
+        for name in ('verify.sh', 'verify.py'):
+            shutil.copy2(ROOT / 'scripts' / name, self.repo / 'scripts' / name)
+        templates = sorted((ROOT / 'ai_nest/templates/verify').glob('*.json'))
+        self.assertGreaterEqual(len(templates), 7)
+        for path in templates:
+            data = json.loads(path.read_text())
+            data.pop('nest_setup_commands', None)
+            self.assertIn('unit', {c['suite'] for c in data['checks']}, path.name)
+            self.assertLessEqual(sum(c['timeout_seconds'] for c in data['checks']) + 30, limit, path.name)
+            (self.repo / 'scripts/verify.config.json').write_text(json.dumps(data))
+            listed = command(self.repo, 'bash', 'scripts/verify.sh', '--list')
+            self.assertEqual(listed.returncode, 0, path.name + listed.stdout + listed.stderr)

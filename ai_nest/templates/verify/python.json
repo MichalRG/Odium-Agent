@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "required_suites": [
+    "static",
+    "unit"
+  ],
+  "checks": [
+    {
+      "name": "lint",
+      "suite": "static",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "-m",
+        "ruff",
+        "check",
+        "."
+      ],
+      "timeout_seconds": 120
+    },
+    {
+      "name": "unit",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+        "tests"
+      ],
+      "timeout_seconds": 600
+    }
+  ]
+}

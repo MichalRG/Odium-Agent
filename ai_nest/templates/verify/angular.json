@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "nest_setup_commands": [
+    {
+      "name": "npm-ci",
+      "argv": [
+        "npm",
+        "ci",
+        "--no-audit",
+        "--no-fund"
+      ],
+      "cwd": "."
+    }
+  ],
+  "required_suites": [
+    "unit",
+    "build"
+  ],
+  "checks": [
+    {
+      "name": "unit",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "npm",
+        "test",
+        "--",
+        "--watch=false"
+      ],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "build",
+      "suite": "build",
+      "cwd": ".",
+      "argv": [
+        "npx",
+        "--no-install",
+        "ng",
+        "build"
+      ],
+      "timeout_seconds": 900
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "required_suites": [
+    "unit",
+    "build"
+  ],
+  "checks": [
+    {
+      "name": "unit",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "./gradlew",
+        "test",
+        "--console=plain"
+      ],
+      "timeout_seconds": 1200
+    },
+    {
+      "name": "assemble",
+      "suite": "build",
+      "cwd": ".",
+      "argv": [
+        "./gradlew",
+        "assemble",
+        "--console=plain"
+      ],
+      "timeout_seconds": 900
+    }
+  ]
+}

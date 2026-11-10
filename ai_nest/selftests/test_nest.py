@@ -393,6 +393,17 @@ class NestTests(unittest.TestCase):
         with self.assertRaisesRegex(nest.Blocked, 'invalid observation'):
             nest.parse_result('explore', result)
 
+    def test_extra_observations_keep_the_most_severe_instead_of_blocking(self):
+        def obs(severity, n):
+            return {'kind': 'fact', 'severity': severity, 'summary': f'{severity}{n}', 'evidence': 'e',
+                    'file': '', 'suggested_action': ''}
+        listed = [obs('info', n) for n in range(16)] + [obs('high', 0), obs('critical', 0)]
+        kept = nest.parse_result('explore', {'summary': 's', 'relevant_files': [], 'risks': [],
+                                             'observations': listed})['observations']
+        self.assertEqual(len(kept), 16)
+        self.assertEqual([o['summary'] for o in kept[:3]], ['critical0', 'high0', 'info0'])
+        self.assertNotIn('info15', [o['summary'] for o in kept])
+
 
 if __name__ == '__main__':
     unittest.main()

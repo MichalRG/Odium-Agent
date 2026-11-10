@@ -518,8 +518,6 @@ def parse_result(stage: str, result: Any) -> dict:
         if not isinstance(result.get(key), expected):
             raise Blocked(f'{stage} returned invalid/missing {key}')
     observations = result.get('observations', [])
-    if len(observations) > 16:
-        raise Blocked(f'{stage} returned too many observations')
     for observation in observations:
         if not isinstance(observation, dict):
             raise Blocked(f'{stage} returned a malformed observation')
@@ -530,8 +528,9 @@ def parse_result(stage: str, result: Any) -> dict:
             raise Blocked(f'{stage} returned an unknown observation kind')
         if observation['severity'] not in ('info', 'low', 'medium', 'high', 'critical'):
             raise Blocked(f'{stage} returned an unknown observation severity')
-        if any(len(observation[k]) > 2000 for k in required):
-            raise Blocked(f'{stage} returned an oversized observation')
+    # Agents list observations in any order; later runs see only the first few per stage.
+    rank = ('critical', 'high', 'medium', 'low', 'info')
+    result['observations'] = sorted(observations, key=lambda o: rank.index(o['severity']))[:16]
     return result
 
 

@@ -559,7 +559,7 @@ class CLIProvider:
         idx = len(list(self.artifact_dir.glob(f'{stage}_*.answer.json'))) + 1
         prefix = self.artifact_dir / f'{stage}_{idx:02d}'
         schema = schema_for(stage)
-        timeout = int(self.cfg.get('limits', {}).get('agent_timeout_seconds', 900))
+        timeout = int(self.cfg.get('limits', {}).get('agent_timeout_seconds', 1800))
         if self.name == 'codex':
             sf = prefix.with_suffix('.schema.json')
             final = prefix.with_suffix('.answer.json')

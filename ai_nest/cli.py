@@ -823,8 +823,47 @@ def checkout_reset(repo: Path, base_commit: str, public_patch: Path | None = Non
 LOCKFILES = ('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'uv.lock', 'poetry.lock', 'go.sum')
 
 
+RUN_ID = re.compile(r'\d{8}-\d{6}-[0-9a-f]{7}')
+
+
+def load_approved_plan(repo: Path, run_id: str) -> dict:
+    """Read a `plan` run the owner approved; refuse if the code moved since it was planned."""
+    if not RUN_ID.fullmatch(run_id):
+        raise Blocked(f'Not a run id: {run_id!r}')
+    run_root = repo / '.ai-nest' / 'runs' / run_id
+    report_file, planning_file = run_root / 'report.json', run_root / 'artifacts' / 'planning.json'
+    if not report_file.is_file():
+        raise Blocked(f'No run {run_id} in {repo / ".ai-nest" / "runs"}')
+    report = json.loads(report_file.read_text(encoding='utf-8'))
+    if report.get('status') != 'planned' or not planning_file.is_file():
+        raise Blocked(f'Run {run_id} is {report.get("status")!r}, not an approvable plan.')
+    head = git(repo, 'rev-parse', 'HEAD')
+    if report['base_commit'] != head:
+        raise Blocked(f'Plan {run_id} was made on commit {report["base_commit"][:12]}, but HEAD is now '
+                      f'{head[:12]}. Run `plan` again so the plan matches the current code.')
+    return {**json.loads(planning_file.read_text(encoding='utf-8')), 'run_id': run_id,
+            'request': report['request'], 'session': report['session']}
+
+
+def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dict) -> None:
+    lines = [f'[AI Nest] PLAN READY FOR APPROVAL (session={session}, run={run_id})',
+             f'Goal: {spec["goal"]}', 'Acceptance criteria:']
+    lines += [f'  {i}. {c}' for i, c in enumerate(spec['acceptance_criteria'], 1)]
+    for title, items in (('Constraints', spec['constraints']),
+                         ('Risks', discovery['risks'] + plan['risks'])):
+        if items:
+            lines += [f'{title}:'] + [f'  - {item}' for item in items]
+    lines.append('Tasks:')
+    lines += [f'  {t["id"]}: {t["description"]} [{", ".join(t["files"])}]' for t in plan['tasks']]
+    lines += [f'Testing: {plan["testing_strategy"]}',
+              f'Approve: python ai_nest/cli.py run --from-plan {run_id} --provider <provider> --allow-host-execution',
+              f'Change:  python ai_nest/cli.py plan --session "{session}" ... "<request + owner feedback>"']
+    print('\n'.join(lines), flush=True)
+
+
 def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
-                session_name: str | None = None, bootstrap: bool = False) -> int:
+                session_name: str | None = None, bootstrap: bool = False,
+                plan_only: bool = False, approved: dict | None = None) -> int:
     cfg = read_config(repo)
     if not allow_host:
         raise Blocked('Running agent-written code requires --allow-host-execution in a disposable, credential-free environment.')
@@ -868,14 +907,37 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
             baseline = run_checks(code_tree, cfg, artifacts / 'baseline.json', 'baseline')
             if not baseline['passed']:
                 raise Blocked('Baseline verification failed; inspect baseline.json and the environment.')
-        discovery = agent_stage(provider, session, 'explore', code_tree, context)
-        spec = agent_stage(provider, session, 'specify', code_tree, {**context, 'discovery': discovery})
-        if not spec['acceptance_criteria'] or spec['open_questions']:
-            raise Blocked(f'Missing acceptance criteria / unresolved questions: {spec["open_questions"]}')
-        plan = agent_stage(provider, session, 'plan', code_tree,
-                           {**context, 'discovery': discovery, 'specification': spec})
-        if not plan['tasks']:
-            raise Blocked('Planner returned an empty task list.')
+        if approved:
+            discovery, spec, plan = approved['discovery'], approved['specification'], approved['plan']
+            summary['approved_plan'] = approved['run_id']
+        else:
+            discovery = agent_stage(provider, session, 'explore', code_tree, context)
+            spec = agent_stage(provider, session, 'specify', code_tree, {**context, 'discovery': discovery})
+            if not spec['acceptance_criteria'] or (spec['open_questions'] and not plan_only):
+                raise Blocked(f'Missing acceptance criteria / unresolved questions: {spec["open_questions"]}')
+            if spec['open_questions']:
+                # Not a failure: the owner answers and runs `plan` again in the same session.
+                summary.update({'status': 'needs_answers', 'completed': now(),
+                                'open_questions': spec['open_questions'], 'specification': spec})
+                write_json(run_root / 'report.json', summary)
+                session.record_result('needs_answers', run_root / 'report.json')
+                print(f'[AI Nest] QUESTIONS BEFORE PLANNING (session={session.name}, run={run_id}):\n'
+                      + '\n'.join(f'  {i}. {q}' for i, q in enumerate(spec['open_questions'], 1))
+                      + '\nAnswer them, then run `plan` again with the same --session and the answers '
+                        'added to the request.', flush=True)
+                return 2
+            plan = agent_stage(provider, session, 'plan', code_tree,
+                               {**context, 'discovery': discovery, 'specification': spec})
+            if not plan['tasks']:
+                raise Blocked('Planner returned an empty task list.')
+            if plan_only:
+                write_json(artifacts / 'planning.json',
+                           {'discovery': discovery, 'specification': spec, 'plan': plan})
+                summary.update({'status': 'planned', 'completed': now()})
+                write_json(run_root / 'report.json', summary)
+                session.record_result('planned', run_root / 'report.json')
+                print_plan(run_id, session.name, discovery, spec, plan)
+                return 0
         public_patch = None
         public_files: list[str] = []
         red_status = 'not_run'
@@ -1215,19 +1277,23 @@ def verify(repo: Path, base: str | None, allow_host: bool) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description='Portable AI Engineering Nest')
     sub = parser.add_subparsers(dest='command', required=True)
-    for cmd in ('doctor', 'run', 'bootstrap', 'verify', 'sessions'):
+    for cmd in ('doctor', 'plan', 'run', 'bootstrap', 'verify', 'sessions'):
         p = sub.add_parser(cmd)
         p.add_argument('--repo', default='.', help='Git repository root')
-        if cmd in ('doctor', 'run', 'bootstrap'):
+        if cmd in ('doctor', 'plan', 'run', 'bootstrap'):
             p.add_argument('--provider', choices=['codex', 'claude'], default='codex')
-        if cmd in ('run', 'bootstrap', 'verify'):
+        if cmd in ('plan', 'run', 'bootstrap', 'verify'):
             p.add_argument('--allow-host-execution', action='store_true',
                            help='Explicitly authorize running repository code on this machine')
-        if cmd in ('run', 'bootstrap'):
+        if cmd in ('plan', 'run', 'bootstrap'):
             p.add_argument('--session', default=None,
                            help='Named persistent handoff session, reusable across runs')
-            p.add_argument('feature', help='Feature request or bug description' if cmd == 'run' else
-                           'What to scaffold so the configured checks can run (greenfield projects)')
+            p.add_argument('feature', nargs='?' if cmd == 'run' else None,
+                           help='What to scaffold so the configured checks can run (greenfield projects)'
+                           if cmd == 'bootstrap' else 'Feature request or bug description')
+        if cmd == 'run':
+            p.add_argument('--from-plan', metavar='RUN_ID', default=None,
+                           help='Implement the approved plan of this `plan` run (request and session come from it)')
         if cmd == 'sessions':
             p.add_argument('action', choices=['list', 'show'])
             p.add_argument('name', nargs='?', help='Required for sessions show')
@@ -1238,9 +1304,17 @@ def main() -> int:
     try:
         if args.command == 'doctor':
             return doctor(repo, args.provider)
-        if args.command in ('run', 'bootstrap'):
+        if args.command == 'run' and args.from_plan:
+            if args.feature or args.session:
+                raise Blocked('--from-plan takes the request and session from the plan run; omit them.')
+            approved = load_approved_plan(repo, args.from_plan)
+            return run_feature(repo, approved['request'], args.provider, args.allow_host_execution,
+                               approved['session'], approved=approved)
+        if args.command in ('plan', 'run', 'bootstrap'):
+            if not args.feature:
+                raise Blocked('run needs a feature request or --from-plan RUN_ID')
             return run_feature(repo, args.feature, args.provider, args.allow_host_execution, args.session,
-                               bootstrap=args.command == 'bootstrap')
+                               bootstrap=args.command == 'bootstrap', plan_only=args.command == 'plan')
         if args.command == 'sessions':
             if args.action == 'list':
                 print(json.dumps(list_sessions(repo), indent=2, ensure_ascii=False))

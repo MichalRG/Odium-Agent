@@ -25,7 +25,8 @@ notes = []
 if '# Role: explorer' in prompt:
     result = {'summary':'explored', 'relevant_files':['calc.py'], 'risks':[]}
 elif '# Role: specification writer' in prompt:
-    result = {'goal':'correct add','acceptance_criteria':['add(1,2)==3'], 'constraints':[], 'open_questions':[]}
+    result = {'goal':'correct add','acceptance_criteria':['add(1,2)==3'], 'constraints':[],
+              'open_questions':['Should add accept floats?'] if scenario == 'questions' else []}
 elif '# Role: planner' in prompt:
     result = {'tasks':[{'id':'T1','description':'correct add','files':['calcx.py' if scenario == 'red_new_module' else 'calc.py']}], 'testing_strategy':'unit','risks':[]}
 elif '# Role: test-engineer — PUBLIC' in prompt:
@@ -113,68 +114,122 @@ Path(args[args.index('--output-last-message') + 1]).write_text(output)
 
 
 class EndToEndTests(unittest.TestCase):
+    def feature_project(self, scenario, local=False):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        tmp = handle.name
+        root = Path(tmp) / 'project'
+        root.mkdir()
+        self.assertEqual(cmd(root, 'git', 'init', '-q').returncode, 0)
+        cmd(root, 'git', 'config', 'user.email', 'test@example.invalid')
+        cmd(root, 'git', 'config', 'user.name', 'Test')
+        self.assertEqual(cmd(root, sys.executable, str(ROOT / 'install.py'), str(root), *(['--local'] if local else [])).returncode, 0)
+        (root / 'calc.py').write_text('def add(a,b):\n    return 0\n')
+        (root / 'tests').mkdir()
+        (root / 'tests/test_existing.py').write_text(
+            'import unittest\nfrom calc import add\nclass TestExisting(unittest.TestCase):\n'
+            '    def test_zero(self):\n        self.assertEqual(add(0,0),0)\n')
+        cfg = json.loads((root / 'nest.config.json').read_text())
+        cfg['tdd']['protected_tests'] = False
+        cfg['tdd']['red_commands'] = [{'name': 'RED', 'argv': [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v'], 'cwd': '.'}]
+        cfg['limits']['max_repair_attempts'] = 1
+        (root / 'nest.config.json').write_text(json.dumps(cfg))
+        (root / 'scripts/verify.config.json').write_text(json.dumps({
+            'version': 1, 'required_suites': ['unit'],
+            'checks': [{'name': 'unit', 'suite': 'unit', 'cwd': '.',
+                        'argv': [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v']}]}))
+        self.assertEqual(cmd(root,'git','add','.').returncode,0)
+        self.assertEqual(cmd(root,'git','commit','-qm','base').returncode,0)
+        bin_path = Path(tmp)/'bin'
+        bin_path.mkdir()
+        fake = bin_path/'codex'
+        fake.write_text(FAKE.replace('PYTHON',sys.executable,1))
+        fake.chmod(0o755)
+        env = {**os.environ, 'PATH':str(bin_path)+os.pathsep+os.environ['PATH'], 'NEST_FAKE_SCENARIO':scenario}
+        return root, env
+
+    def nest(self, root, env, *argv):
+        return cmd(root, sys.executable, 'ai_nest/cli.py', *argv, env=env)
+
+    def test_plan_stops_for_approval_then_runs_the_approved_plan(self):
+        root, env = self.feature_project('happy')
+        p = self.nest(root, env, 'plan', '--session', 'calc', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('PLAN READY FOR APPROVAL', p.stdout)
+        self.assertIn('T1: correct add [calc.py]', p.stdout)
+        plan_report = json.loads(next((root / '.ai-nest/runs').glob('*/report.json')).read_text())
+        self.assertEqual(plan_report['status'], 'planned')
+        # Nothing to review yet: no branch or worktree is left behind.
+        self.assertFalse(Path(plan_report['worktree']).exists())
+        self.assertEqual(cmd(root, 'git', 'branch', '--list', plan_report['branch']).stdout, '')
+        p = self.nest(root, env, 'run', '--from-plan', plan_report['run_id'], '--allow-host-execution')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        run_dir = next(d for d in (root / '.ai-nest/runs').iterdir() if d.name != plan_report['run_id'])
+        report = json.loads((run_dir / 'report.json').read_text())
+        self.assertEqual((report['status'], report['approved_plan'], report['session']),
+                         ('verified', plan_report['run_id'], 'calc'))
+        self.assertEqual(report['request'], 'Fix addition')
+        stages = {f.name.split('_')[0] for f in (run_dir / 'artifacts').glob('*.schema.json')}
+        self.assertFalse(stages & {'explore', 'specify', 'plan'}, stages)
+        self.assertIn('implement', stages)
+
+    def test_plan_returns_open_questions_instead_of_planning(self):
+        root, env = self.feature_project('questions')
+        p = self.nest(root, env, 'plan', '--session', 'calc', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 2, p.stdout + p.stderr)
+        self.assertIn('1. Should add accept floats?', p.stdout)
+        run_dir = next((root / '.ai-nest/runs').iterdir())
+        self.assertEqual(json.loads((run_dir / 'report.json').read_text())['status'], 'needs_answers')
+        self.assertFalse((run_dir / 'artifacts/planning.json').exists())
+        self.assertNotEqual(self.nest(root, env, 'run', '--from-plan', run_dir.name,
+                                      '--allow-host-execution').returncode, 0)
+
+    def test_approved_plan_is_refused_after_the_code_moved(self):
+        root, env = self.feature_project('happy')
+        self.assertEqual(self.nest(root, env, 'plan', '--allow-host-execution', 'Fix addition').returncode, 0)
+        run_id = next((root / '.ai-nest/runs').iterdir()).name
+        cmd(root, 'git', 'commit', '-q', '--allow-empty', '-m', 'moved on')
+        p = self.nest(root, env, 'run', '--from-plan', run_id, '--allow-host-execution')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('Run `plan` again', p.stderr)
+        for bad in ('../../etc', 'x' * 20):
+            p = self.nest(root, env, 'run', '--from-plan', bad, '--allow-host-execution')
+            self.assertIn('Not a run id', p.stderr)
+
     def run_scenario(self, scenario, local=False):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / 'project'
-            root.mkdir()
-            self.assertEqual(cmd(root, 'git', 'init', '-q').returncode, 0)
-            cmd(root, 'git', 'config', 'user.email', 'test@example.invalid')
-            cmd(root, 'git', 'config', 'user.name', 'Test')
-            self.assertEqual(cmd(root, sys.executable, str(ROOT / 'install.py'), str(root), *(['--local'] if local else [])).returncode, 0)
-            (root / 'calc.py').write_text('def add(a,b):\n    return 0\n')
-            (root / 'tests').mkdir()
-            (root / 'tests/test_existing.py').write_text(
-                'import unittest\nfrom calc import add\nclass TestExisting(unittest.TestCase):\n'
-                '    def test_zero(self):\n        self.assertEqual(add(0,0),0)\n')
-            cfg = json.loads((root / 'nest.config.json').read_text())
-            cfg['tdd']['protected_tests'] = False
-            cfg['tdd']['red_commands'] = [{'name': 'RED', 'argv': [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v'], 'cwd': '.'}]
-            cfg['limits']['max_repair_attempts'] = 1
-            (root / 'nest.config.json').write_text(json.dumps(cfg))
-            (root / 'scripts/verify.config.json').write_text(json.dumps({
-                'version': 1, 'required_suites': ['unit'],
-                'checks': [{'name': 'unit', 'suite': 'unit', 'cwd': '.',
-                            'argv': [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v']}]}))
-            self.assertEqual(cmd(root,'git','add','.').returncode,0)
-            self.assertEqual(cmd(root,'git','commit','-qm','base').returncode,0)
-            bin_path = Path(tmp)/'bin'
-            bin_path.mkdir()
-            fake = bin_path/'codex'
-            fake.write_text(FAKE.replace('PYTHON',sys.executable,1))
-            fake.chmod(0o755)
-            env = {**os.environ, 'PATH':str(bin_path)+os.pathsep+os.environ['PATH'], 'NEST_FAKE_SCENARIO':scenario}
-            p = cmd(root, sys.executable, 'ai_nest/cli.py', 'run', '--provider', 'codex',
-                    '--session', 'regression', '--allow-host-execution', 'Fix addition', env=env)
-            reports = list((root/'.ai-nest/runs').glob('*/report.json'))
-            self.assertEqual(len(reports), 1, p.stdout + p.stderr)
-            report = json.loads(reports[0].read_text())
-            if scenario in ('happy','coder_local_gate_edit','coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit','red_new_module','new_fixture','new_nested_fixture','coder_nested_helper_edit'):
-                self.assertEqual(p.returncode, 0, p.stdout+p.stderr)
-                self.assertEqual(report['status'],'verified')
-                self.assertEqual(report['attempts'], 2 if scenario in ('coder_local_gate_edit','coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit') else 1)
-                if scenario == 'happy':
-                    self.assertIn('verification_optimizations', report)
-                if local:
-                    self.assertEqual(cmd(root, 'git', 'status', '--porcelain').stdout, '')
-                    self.assertNotIn('ai_nest/cli.py', cmd(root, 'git', 'ls-tree', '-r', '--name-only', report['branch']).stdout)
-                if scenario == 'coder_commit':
-                    # Branch history must remain pinned to the trusted original commit.
-                    branch_sha = cmd(root, 'git','rev-parse', report['branch']).stdout.strip()
-                    self.assertEqual(branch_sha, report['base_commit'])
-                    committed_sh = cmd(root,'git','show',report['branch']+':scripts/verify.sh').stdout
-                    self.assertNotEqual(committed_sh, '#!/bin/sh\nexit 0\n')
-                    self.assertIn('verify.py', committed_sh)
-                if scenario == 'red_new_module':
-                    self.assertIn('calcx.py', report['code_files'])
-            else:
-                self.assertNotEqual(p.returncode,0,p.stdout+p.stderr)
-                self.assertEqual(report['status'],'blocked')
-                self.assertFalse(Path(report['worktree']).exists())
-                if scenario == 'invalid_json':
-                    self.assertIn('invalid JSON',report['error'])
-                    self.assertTrue(list(reports[0].parent.glob('artifacts/explore*.stdout.log')))
-                if scenario == 'red_invalid':
-                    self.assertIn('RED', report['error'])
+        root, env = self.feature_project(scenario, local)
+        p = cmd(root, sys.executable, 'ai_nest/cli.py', 'run', '--provider', 'codex',
+                '--session', 'regression', '--allow-host-execution', 'Fix addition', env=env)
+        reports = list((root/'.ai-nest/runs').glob('*/report.json'))
+        self.assertEqual(len(reports), 1, p.stdout + p.stderr)
+        report = json.loads(reports[0].read_text())
+        if scenario in ('happy','coder_local_gate_edit','coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit','red_new_module','new_fixture','new_nested_fixture','coder_nested_helper_edit'):
+            self.assertEqual(p.returncode, 0, p.stdout+p.stderr)
+            self.assertEqual(report['status'],'verified')
+            self.assertEqual(report['attempts'], 2 if scenario in ('coder_local_gate_edit','coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit') else 1)
+            if scenario == 'happy':
+                self.assertIn('verification_optimizations', report)
+            if local:
+                self.assertEqual(cmd(root, 'git', 'status', '--porcelain').stdout, '')
+                self.assertNotIn('ai_nest/cli.py', cmd(root, 'git', 'ls-tree', '-r', '--name-only', report['branch']).stdout)
+            if scenario == 'coder_commit':
+                # Branch history must remain pinned to the trusted original commit.
+                branch_sha = cmd(root, 'git','rev-parse', report['branch']).stdout.strip()
+                self.assertEqual(branch_sha, report['base_commit'])
+                committed_sh = cmd(root,'git','show',report['branch']+':scripts/verify.sh').stdout
+                self.assertNotEqual(committed_sh, '#!/bin/sh\nexit 0\n')
+                self.assertIn('verify.py', committed_sh)
+            if scenario == 'red_new_module':
+                self.assertIn('calcx.py', report['code_files'])
+        else:
+            self.assertNotEqual(p.returncode,0,p.stdout+p.stderr)
+            self.assertEqual(report['status'],'blocked')
+            self.assertFalse(Path(report['worktree']).exists())
+            if scenario == 'invalid_json':
+                self.assertIn('invalid JSON',report['error'])
+                self.assertTrue(list(reports[0].parent.glob('artifacts/explore*.stdout.log')))
+            if scenario == 'red_invalid':
+                self.assertIn('RED', report['error'])
 
     def run_bootstrap(self, scenario, greenfield=True):
         handle = tempfile.TemporaryDirectory()

@@ -102,11 +102,21 @@ git add -A  # review `git diff --cached` before committing
 
 ### Start a feature
 
+The easy way is one chat: Codex `$build-feature <what you want>` or Claude Code `/build-feature <what you want>`. The chat comes back to you only when the nest has questions, when the plan is ready for your approval, and with the result. It uses these two commands, which you can also run yourself:
+
 ```bash
-python ai_nest/cli.py run --provider codex --session projects-pagination \
+# 1. Scout, specify and plan, then stop. Changes no code.
+#    Exit 0: plan printed for approval. Exit 2: questions printed; answer them in the
+#    request and run `plan` again with the same --session (the planner sees the earlier runs).
+python ai_nest/cli.py plan --provider codex --session projects-pagination \
   --allow-host-execution "Implement project pagination"
-# or --provider claude
+
+# 2. Implement exactly the approved plan: tests (RED), code, verification, review.
+#    Refused when HEAD moved since planning; then plan again.
+python ai_nest/cli.py run --from-plan <plan-run-id> --provider codex --allow-host-execution
 ```
+
+To skip the approval, `run --session <name> --allow-host-execution "<request>"` does both steps in one command and blocks on open questions. Use `--provider claude` for Claude Code agents.
 
 ### Start from an empty project (`bootstrap`)
 

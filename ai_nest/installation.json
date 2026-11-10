@@ -1,11 +1,11 @@
 {
   "release": "4.4",
   "mode": "committed",
-  "generated_at": "2026-11-10T09:38:49.688464+00:00",
+  "generated_at": "2026-11-10T16:29:10.034542+00:00",
   "files": {
     "ai_nest/cli.py": {
       "status": "installed",
-      "sha256": "33c91e5d38ff81f280ad0a10e93c4e549e9eb64e7e5d99363ea096fe9f6cdfff"
+      "sha256": "23f6e4c615eef0805677128dc22e9c107ad7c8a0029e3da4f15b08dbdb7071d4"
     },
     "ai_nest/memory.py": {
       "status": "installed",
@@ -57,11 +57,11 @@
     },
     ".agents/skills/build-feature/SKILL.md": {
       "status": "installed",
-      "sha256": "ec45c476b3f5356d8854c91a6adc58963a16cbe063530e65adfeb286329af4dc"
+      "sha256": "b3b6fef54e4f967fef6810fca785b8af253a742bebe15cd219c94414cef1ee98"
     },
     ".claude/skills/build-feature/SKILL.md": {
       "status": "installed",
-      "sha256": "ec45c476b3f5356d8854c91a6adc58963a16cbe063530e65adfeb286329af4dc"
+      "sha256": "b3b6fef54e4f967fef6810fca785b8af253a742bebe15cd219c94414cef1ee98"
     },
     "scripts/verify.sh": {
       "status": "installed",
@@ -137,7 +137,7 @@
     },
     "ai_nest/selftests/test_cli_e2e.py": {
       "status": "installed",
-      "sha256": "d02cc4a1c69e72d61ce54620db65c441be7a2850b493124642f1a2f1583164fd"
+      "sha256": "f91b74029534962f5d77e6268494128c8e91887f47556a657e056373c1c7aa3a"
     }
   },
   "configuration_schema": 2

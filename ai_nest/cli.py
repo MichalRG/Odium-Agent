@@ -36,6 +36,7 @@ SCHEMAS = {
               'coder_guidance': 'list', 'test_strategy': 'object'},
     'protected_tests': {'summary': 'string', 'files_modified': 'list'},
     'implement': {'summary': 'string', 'files_modified': 'list'},
+    'bootstrap': {'summary': 'string', 'files_modified': 'list'},
     'repair': {'summary': 'string', 'files_modified': 'list'},
     'review': {'approved': 'boolean', 'findings': 'list', 'summary': 'string'},
     'security_review': {'approved': 'boolean', 'findings': 'list', 'summary': 'string'},
@@ -249,16 +250,28 @@ def normalized_path(filename: str) -> str:
     return filename.replace('\\', '/').removeprefix('./')
 
 
+def path_rule_match(path: str, rules: list[str]) -> bool:
+    return any(path == rule or (rule.endswith('/') and path.startswith(rule))
+               or (any(ch in rule for ch in '*?[') and fnmatch.fnmatchcase(path, rule))
+               for rule in rules)
+
+
 def is_blocked_file(filename: str, cfg: dict) -> bool:
     path = normalized_path(filename)
     safety = cfg.get('safety', {})
-    if any(path == rule or (rule.endswith('/') and path.startswith(rule))
-           or (any(ch in rule for ch in '*?[') and fnmatch.fnmatchcase(path, rule))
-           for rule in safety.get('blocked_paths', [])):
+    if path_rule_match(path, safety.get('blocked_paths', [])):
         return True
     # Block check definitions anywhere in a monorepo, not only at root.
     return any(fnmatch.fnmatchcase(Path(path).name.lower(), rule)
                for rule in safety.get('protected_basenames', []))
+
+
+def bootstrap_creatable(filename: str, cfg: dict) -> bool:
+    """A greenfield scaffold may add build files (protected basenames, bootstrap_creatable_paths), never Nest gates."""
+    safety = cfg.get('safety', {})
+    allowed = set(safety.get('bootstrap_creatable_paths', []))
+    return not path_rule_match(normalized_path(filename),
+                               [rule for rule in safety.get('blocked_paths', []) if rule not in allowed])
 
 
 @lru_cache(maxsize=512)
@@ -311,7 +324,12 @@ def assert_authorized_changes(repo: Path, cfg: dict, role: str, *, public_files:
     files = changed_files(repo)
     # A test author can add a NEW fixture in a test directory. Existing shared
     # fixtures and all other gate policy files remain protected for every role.
-    tracked_base = set(git(repo, 'ls-tree', '-r', '--name-only', 'HEAD').splitlines()) if role == 'tests' else set()
+    tracked_base = (set(git(repo, 'ls-tree', '-r', '--name-only', 'HEAD').splitlines())
+                    if role in ('tests', 'bootstrap') else set())
+    if role == 'bootstrap':
+        generated = [f for f in files if {'node_modules', '.venv', '__pycache__'} & set(f.split('/'))]
+        if generated:
+            raise Blocked(f'Bootstrap change includes dependency/build output; add a .gitignore for it: {generated[:5]}')
     def newly_created_fixture(name: str) -> bool:
         return (role == 'tests' and Path(name).name.lower() == 'conftest.py'
                 and is_test_file(name, cfg) and name not in tracked_base
@@ -322,10 +340,18 @@ def assert_authorized_changes(repo: Path, cfg: dict, role: str, *, public_files:
     def inherited_public_fixture(name: str) -> bool:
         return (role == 'coder' and name in (public_files or ())
                 and Path(name).name.lower() == 'conftest.py' and is_test_file(name, cfg))
+    # Bootstrap has no prior build/test config to weaken, so it may only ADD such files.
+    def bootstrap_new_file(name: str) -> bool:
+        return role == 'bootstrap' and name not in tracked_base and bootstrap_creatable(name, cfg)
     blocked = [name for name in files if is_blocked_file(name, cfg)
-               and not newly_created_fixture(name) and not inherited_public_fixture(name)]
+               and not newly_created_fixture(name) and not inherited_public_fixture(name)
+               and not bootstrap_new_file(name)]
     if blocked:
         raise Blocked(f'Agent changed protected files: {blocked}')
+    if role == 'bootstrap':
+        altered = [f for f in files if f in tracked_base and is_test_file(f, cfg)]
+        if altered:
+            raise Blocked(f'Bootstrap may add test files, not modify existing ones: {altered}')
     if role == 'tests':
         unexpected = [f for f in files if not is_test_file(f, cfg)]
         if unexpected:
@@ -368,8 +394,8 @@ def changed_files(repo: Path, base: str = 'HEAD') -> list[str]:
 
 def get_patch(repo: Path, out: Path, cfg: dict, test_only: bool = False,
               forbid_tests: bool = False, *, public_files: list[str] | None = None,
-              public_reference: Path | None = None) -> list[str]:
-    role = 'tests' if test_only else 'coder' if forbid_tests else 'general'
+              public_reference: Path | None = None, bootstrap: bool = False) -> list[str]:
+    role = 'bootstrap' if bootstrap else 'tests' if test_only else 'coder' if forbid_tests else 'general'
     files = assert_authorized_changes(repo, cfg, role, public_files=public_files,
                                       public_reference=public_reference)
     if not files:
@@ -467,6 +493,7 @@ def schema_for(stage: str) -> dict:
                                            ('unit', 'integration', 'contract', 'e2e', 'smoke')})}),
         'protected_tests': obj({'summary': string, 'files_modified': list_of(string)}),
         'implement': obj({'summary': string, 'files_modified': list_of(string)}),
+        'bootstrap': obj({'summary': string, 'files_modified': list_of(string)}),
         'repair': obj({'summary': string, 'files_modified': list_of(string)}),
         'review': obj({'approved': {'type': 'boolean'},
                        'findings': list_of(obj({'severity': {'type': 'string', 'enum': ['critical', 'high', 'medium', 'low']}, 'file': string,
@@ -540,6 +567,8 @@ class CLIProvider:
             write_json(sf, schema)
             argv = ['codex', 'exec', '--sandbox',
                     'workspace-write' if write else 'read-only',
+                    # Scaffolding runs package managers (uv, npm), which need the registry.
+                    *(['-c', 'sandbox_workspace_write.network_access=true'] if stage == 'bootstrap' else []),
                     '--output-schema', str(sf), '--output-last-message', str(final), '-']
             p = call(argv, cwd, timeout, input_text=prompt)
             raw = final.read_text(encoding='utf-8') if final.exists() else ''
@@ -609,6 +638,20 @@ def prepare_verified_tree(source: Path, worktree: Path, code_patch: Path,
         raise Blocked(f'git diff --check failed: {p.stdout[-2000:]}')
     setup_environment(worktree, cfg, checks_file.parent / 'verify_setup.json')
     return run_checks(worktree, cfg, checks_file, 'verification')
+
+
+def bootstrap_contract(tree: Path, cfg: dict) -> dict:
+    """The human-owned commands a greenfield skeleton must satisfy; the agent cannot change them."""
+    try:
+        manifest = json.loads((tree / 'scripts' / 'verify.config.json').read_text(encoding='utf-8'))
+        checks = [{k: c.get(k, '.' if k == 'cwd' else None) for k in ('name', 'suite', 'cwd', 'argv')}
+                  for c in manifest.get('checks', [])]
+    except (OSError, ValueError, AttributeError):
+        checks = []
+    checks = checks or cfg.get('verification', {}).get('commands', [])
+    setup = cfg.get('environment', {}).get('setup_commands', [])
+    missing = sorted({c.get('cwd', '.') for c in checks + setup if not (tree / c.get('cwd', '.')).is_dir()})
+    return {'verify_checks': checks, 'setup_commands': setup, 'missing_directories': missing}
 
 
 def setup_environment(worktree: Path, cfg: dict, report_file: Path) -> None:
@@ -777,8 +820,11 @@ def checkout_reset(repo: Path, base_commit: str, public_patch: Path | None = Non
         raise Blocked('Could not recover original trusted base commit')
 
 
+LOCKFILES = ('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'uv.lock', 'poetry.lock', 'go.sum')
+
+
 def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
-                session_name: str | None = None) -> int:
+                session_name: str | None = None, bootstrap: bool = False) -> int:
     cfg = read_config(repo)
     if not allow_host:
         raise Blocked('Running agent-written code requires --allow-host-execution in a disposable, credential-free environment.')
@@ -786,7 +832,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
     effective_checks(repo, cfg)
     validate_outer_verify_timeout(repo, cfg)
     tdd = cfg.get('tdd', {})
-    if tdd.get('enabled', True):
+    tdd_enabled = tdd.get('enabled', True) and not bootstrap  # no test runner exists yet for RED
+    if tdd_enabled:
         if not tdd.get('red_commands'):
             raise Blocked('TDD enabled but tdd.red_commands is empty; configure targeted public test commands.')
     run_id = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:7]
@@ -798,7 +845,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
     summary: dict = {'run_id': run_id, 'started': now(), 'status': 'running',
                      'request': request, 'provider': provider_name, 'base_commit': base_commit,
                      'session': session.name, 'session_id': session.slug,
-                     'session_workspace': str(session.root), 'agent_routing': []}
+                     'session_workspace': str(session.root), 'agent_routing': [],
+                     'mode': 'bootstrap' if bootstrap else 'feature'}
     branch = 'ai-nest/' + run_id
     code_tree, public_tree, protected_tree, verify_tree, review_tree = (
         run_root / x for x in ('code', 'public-tests', 'protected-tests', 'verification', 'review'))
@@ -809,11 +857,17 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         checkout_worktree(repo, code_tree, branch=branch)
         checkout_worktree(repo, public_tree)
         print(f'[AI Nest] session={session.name}, run={run_id}, branch={branch}', flush=True)
-        setup_environment(code_tree, cfg, artifacts / 'baseline_setup.json')
-        baseline = run_checks(code_tree, cfg, artifacts / 'baseline.json', 'baseline')
-        if not baseline['passed']:
-            raise Blocked('Baseline verification failed; inspect baseline.json and the environment.')
         context = {'user_request': request, 'base_commit': summary['base_commit']}
+        if bootstrap:
+            # Setup commands need the toolchain bootstrap is about to create, so only probe the checks.
+            if run_checks(code_tree, cfg, artifacts / 'baseline.json', 'baseline')['passed']:
+                raise Blocked('Baseline already passes; bootstrap only creates missing project skeletons. Use `run`.')
+            context['bootstrap'] = bootstrap_contract(code_tree, cfg)
+        else:
+            setup_environment(code_tree, cfg, artifacts / 'baseline_setup.json')
+            baseline = run_checks(code_tree, cfg, artifacts / 'baseline.json', 'baseline')
+            if not baseline['passed']:
+                raise Blocked('Baseline verification failed; inspect baseline.json and the environment.')
         discovery = agent_stage(provider, session, 'explore', code_tree, context)
         spec = agent_stage(provider, session, 'specify', code_tree, {**context, 'discovery': discovery})
         if not spec['acceptance_criteria'] or spec['open_questions']:
@@ -826,10 +880,13 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         public_files: list[str] = []
         red_status = 'not_run'
         red_result = None
-        if tdd.get('enabled', True):
+        if tdd_enabled:
             tests = agent_stage(provider, session, 'tests', public_tree,
                                 {**context, 'specification': spec, 'discovery': discovery,
-                                 'plan': plan, 'test_visibility': 'public'}, write=True)
+                                 'plan': plan, 'test_visibility': 'public',
+                                 'test_policy': {'existing_test_files_editable': bool(
+                                     cfg.get('safety', {}).get('allow_existing_test_modifications', False))}},
+                                write=True)
             public_patch = artifacts / 'public_tests.patch'
             public_files = get_patch(public_tree, public_patch, cfg, test_only=True)
             if set(tests['files_modified']) != set(public_files):
@@ -865,7 +922,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         max_attempts = int(cfg.get('limits', {}).get('max_repair_attempts', 2)) + 1
         for attempt in range(1, max_attempts + 1):
             print(f'[AI Nest] implementation attempt {attempt}/{max_attempts}', flush=True)
-            stage = 'implement' if attempt == 1 else 'repair'
+            stage = 'bootstrap' if bootstrap else 'implement' if attempt == 1 else 'repair'
             try:
                 agent_stage(provider, session, stage, code_tree,
                             {**context, 'specification': spec, 'plan': plan,
@@ -879,8 +936,11 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                     raise Blocked('Coder moved HEAD away from the trusted base commit')
                 code_patch = artifacts / f'code_attempt_{attempt}.patch'
                 code_files = get_patch(code_tree, code_patch, cfg, forbid_tests=True,
-                                       public_files=public_files, public_reference=public_tree)
-                security_paths(code_files, cfg)
+                                       public_files=public_files, public_reference=public_tree,
+                                       bootstrap=bootstrap)
+                # Bootstrap-created build/test config passed the add-only policy in get_patch.
+                created = {f for f in code_files if is_blocked_file(f, cfg)} if bootstrap else set()
+                security_paths(code_files, cfg, approved_new_test_fixtures=created)
             except Blocked as ex:
                 feedback = {'cause': 'worker_policy_or_execution_error', 'guidance': str(ex)[:1000]}
                 checkout_reset(code_tree, base_commit, public_patch)
@@ -893,7 +953,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                      if Path(name).name.lower() == 'conftest.py'}
                 validation = prepare_verified_tree(repo, verify_tree, code_patch, patches, cfg,
                                                    verification_file,
-                                                   approved_new_test_fixtures=approved_fixtures)
+                                                   approved_new_test_fixtures=approved_fixtures | created)
                 if not validation['passed']:
                     feedback = safe_failure_feedback(validation, protected=protected_patch is not None)
                     continue
@@ -927,12 +987,16 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                         feedback = safe_failure_feedback(recheck, protected=False)
                         continue
                 before = git(review_tree, 'status', '--porcelain')
-                public_diff = call(['git', 'diff', '--binary', 'HEAD'], review_tree).stdout
+                # Generated lockfiles would exhaust the review budget; they stay readable in the checkout.
+                public_diff = call(['git', 'diff', '--binary', 'HEAD', '--', '.',
+                                    *[f':(exclude,glob)**/{name}' for name in LOCKFILES]], review_tree).stdout
+                omitted = [f for f in code_files if Path(f).name in LOCKFILES]
                 if len(public_diff) > 120000:
                     raise Blocked('Diff exceeds complete review budget; split the feature into smaller tasks.')
                 review = agent_stage(provider, session, 'review', review_tree,
                                      {'request': request, 'specification': spec, 'plan': plan,
-                                      'diff': public_diff, 'verification_passed': True,
+                                      'diff': public_diff, 'lockfiles_omitted_from_diff': omitted,
+                                      'verification_passed': True,
                                       'base_commit': base_commit}, attempt=attempt)
                 if git(review_tree, 'status', '--porcelain') != before:
                     raise Blocked('Reviewer changed repository files')
@@ -947,6 +1011,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                     summary.setdefault('advisory_review_notes', []).append(
                         {'attempt': attempt, 'findings': review['findings']})
                 needs_sec, reasons = needs_security_review(code_files, cfg, session)
+                if bootstrap:
+                    needs_sec, reasons = True, reasons + ['bootstrap_adds_dependencies']
                 summary['agent_routing'].append({'attempt': attempt, 'agent': 'security_review',
                                                  'invoked': needs_sec,
                                                  'reason': reasons or ['No configured sensitive paths affected']})
@@ -954,7 +1020,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 if needs_sec:
                     sec = agent_stage(provider, session, 'security_review', review_tree,
                                       {'request': request, 'specification': spec, 'plan': plan,
-                                       'diff': public_diff, 'verification_passed': True,
+                                       'diff': public_diff, 'lockfiles_omitted_from_diff': omitted,
+                                       'verification_passed': True,
                                        'risk_reason': reasons, 'base_commit': base_commit}, attempt=attempt)
                     if git(review_tree, 'status', '--porcelain') != before:
                         raise Blocked('Security reviewer changed repository files')
@@ -971,6 +1038,10 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                 'code_files': code_files, 'review': review,
                                 'verification': str(verification_file),
                                 'note': 'Locally verified only. No remote CI/human review, PR, merge or deployment.'})
+                if bootstrap:
+                    summary['created_protected_files'] = sorted(created)
+                    print('[AI Nest] Bootstrap created build/test config; review it before committing: '
+                          + ', '.join(sorted(created)), flush=True)
                 write_json(run_root / 'report.json', summary)
                 session.record_result('verified', run_root / 'report.json')
                 print(f'[AI Nest] VERIFIED local gates. Worktree: {code_tree}', flush=True)
@@ -1100,6 +1171,8 @@ def doctor(repo: Path, provider: str) -> int:
         check = call(['bash', 'scripts/verify.sh', '--list'], repo, timeout=30)
         if check.returncode:
             print('NOT READY: verification manifest cannot be loaded by verify.sh: ' + check.stderr[-900:])
+            if 'missing directory' in check.stderr:
+                print('  Greenfield project? Scaffold it: python ai_nest/cli.py bootstrap --allow-host-execution "<what to build>"')
             return 1
     if not clean:
         print('NOT READY: source checkout is dirty; commit or stash changes first.')
@@ -1142,18 +1215,19 @@ def verify(repo: Path, base: str | None, allow_host: bool) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description='Portable AI Engineering Nest')
     sub = parser.add_subparsers(dest='command', required=True)
-    for cmd in ('doctor', 'run', 'verify', 'sessions'):
+    for cmd in ('doctor', 'run', 'bootstrap', 'verify', 'sessions'):
         p = sub.add_parser(cmd)
         p.add_argument('--repo', default='.', help='Git repository root')
-        if cmd in ('doctor', 'run'):
+        if cmd in ('doctor', 'run', 'bootstrap'):
             p.add_argument('--provider', choices=['codex', 'claude'], default='codex')
-        if cmd in ('run', 'verify'):
+        if cmd in ('run', 'bootstrap', 'verify'):
             p.add_argument('--allow-host-execution', action='store_true',
                            help='Explicitly authorize running repository code on this machine')
-        if cmd == 'run':
+        if cmd in ('run', 'bootstrap'):
             p.add_argument('--session', default=None,
                            help='Named persistent handoff session, reusable across runs')
-            p.add_argument('feature', help='Feature request or bug description')
+            p.add_argument('feature', help='Feature request or bug description' if cmd == 'run' else
+                           'What to scaffold so the configured checks can run (greenfield projects)')
         if cmd == 'sessions':
             p.add_argument('action', choices=['list', 'show'])
             p.add_argument('name', nargs='?', help='Required for sessions show')
@@ -1164,8 +1238,9 @@ def main() -> int:
     try:
         if args.command == 'doctor':
             return doctor(repo, args.provider)
-        if args.command == 'run':
-            return run_feature(repo, args.feature, args.provider, args.allow_host_execution, args.session)
+        if args.command in ('run', 'bootstrap'):
+            return run_feature(repo, args.feature, args.provider, args.allow_host_execution, args.session,
+                               bootstrap=args.command == 'bootstrap')
         if args.command == 'sessions':
             if args.action == 'list':
                 print(json.dumps(list_sessions(repo), indent=2, ensure_ascii=False))

@@ -3,6 +3,7 @@
 from pathlib import Path
 import argparse
 import json
+import os
 import copy
 import hashlib
 import datetime as dt
@@ -48,6 +49,8 @@ LOCAL_EXCLUDES = ['/.ai-nest/', '/ai_nest/', '/install.py', '/nest.config.json',
                   '/scripts/verify.config.json.example', '/.agents/skills/build-feature/',
                   '/.claude/skills/build-feature/', '/.claude/settings.json', '/AGENTS.md', '/CLAUDE.md',
                   '/GEMINI.md', '/.github/copilot-instructions.md']
+# Build/dependency output that would otherwise leak into agent change sets.
+GENERATED_IGNORES = ['__pycache__/', '*.pyc', '.pytest_cache/', '.DS_Store', 'node_modules/', 'dist/', 'build/', 'coverage/']
 EXCLUDE_BEGIN, EXCLUDE_END = '# >>> AI Nest local install (managed by install.py) >>>', '# <<< AI Nest local install <<<'
 
 
@@ -61,7 +64,7 @@ def write_local_excludes(dst: Path, tracked: set[str]) -> Path:
     out = subprocess.run(['git', 'rev-parse', '--git-path', 'info/exclude'], cwd=dst,
                          capture_output=True, text=True, check=True).stdout.strip()
     path = Path(out) if Path(out).is_absolute() else dst / out
-    entries = [e for e in LOCAL_EXCLUDES if e.strip('/') not in tracked]
+    entries = [e for e in LOCAL_EXCLUDES if e.strip('/') not in tracked] + GENERATED_IGNORES
     block = '\n'.join([EXCLUDE_BEGIN, *entries, EXCLUDE_END])
     old = path.read_text(encoding='utf-8') if path.is_file() else ''
     pattern = re.compile(re.escape(EXCLUDE_BEGIN) + '.*?' + re.escape(EXCLUDE_END), re.S)
@@ -71,16 +74,35 @@ def write_local_excludes(dst: Path, tracked: set[str]) -> Path:
     return path
 
 
-def apply_template(dst: Path, name: str, force: bool) -> None:
+def template_spec(value: str) -> tuple[str, str]:
+    """'python' or 'python:backend' -> (template, folder); the folder may not exist yet (bootstrap creates it)."""
+    name, _, folder = value.partition(':')
+    if name not in TEMPLATES:
+        raise argparse.ArgumentTypeError(f'unknown template {name!r}; choose from {", ".join(TEMPLATES)}')
+    if folder.startswith('/') or '\\' in folder or '..' in folder.split('/'):
+        raise argparse.ArgumentTypeError(f'folder must be relative inside the repository: {folder!r}')
+    folder = folder.rstrip('/') or '.'
+    return name, folder
+
+
+def apply_template(dst: Path, specs: list[tuple[str, str]], force: bool) -> None:
     target = dst / 'scripts' / 'verify.config.json'
+    label = ' + '.join(f'{name}:{folder}' for name, folder in specs)
     if target.exists() and not force:
-        print(f'Template {name}: scripts/verify.config.json already exists; left unchanged.')
+        print(f'Template {label}: scripts/verify.config.json already exists; left unchanged.')
         return
-    data = json.loads((SOURCE / 'ai_nest' / 'templates' / 'verify' / f'{name}.json').read_text(encoding='utf-8'))
-    setup = data.pop('nest_setup_commands', [])
+    data = {'version': 1, 'default_timeout_seconds': 600, 'required_suites': [], 'checks': []}
+    setup = []
+    for name, folder in specs:
+        part = json.loads((SOURCE / 'ai_nest' / 'templates' / 'verify' / f'{name}.json').read_text(encoding='utf-8'))
+        # Several stacks share one manifest, so names get a folder prefix to stay unique.
+        prefix = '' if len(specs) == 1 else re.sub(r'[^A-Za-z0-9_-]', '-', folder if folder != '.' else name) + '-'
+        data['checks'] += [{**c, 'name': prefix + c['name'], 'cwd': folder} for c in part['checks']]
+        setup += [{**c, 'name': prefix + c['name'], 'cwd': folder} for c in part.get('nest_setup_commands', [])]
+        data['required_suites'] += [x for x in part.get('required_suites', []) if x not in data['required_suites']]
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-    print(f'Template {name}: wrote scripts/verify.config.json; edit commands and cwd for your layout.')
+    print(f'Template {label}: wrote scripts/verify.config.json; edit commands and cwd for your layout.')
     cfg_path = dst / 'nest.config.json'
     cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     env = cfg.setdefault('environment', {})
@@ -262,7 +284,7 @@ def migrate_existing_config(dst: Path) -> None:
 
 
 def install(dst: Path, force: bool = False, update_code: bool = False, local: bool = False,
-            template: str | None = None) -> None:
+            templates: list[tuple[str, str]] | None = None) -> None:
     dst = dst.resolve()
     if not (dst / '.git').exists() and subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=dst, capture_output=True).returncode:
         raise RuntimeError('Destination must be an existing Git repository')
@@ -326,11 +348,11 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
         if '.claude/agents/' in text or 'New behavior gets a test' in text:
             print('WARNING: CLAUDE.md may contain obsolete agent/test ownership instructions.')
             print('  Review against AGENTS.md; coder should not be instructed to modify tests.')
-    if template:
-        apply_template(dst, template, force)
+    if templates:
+        apply_template(dst, templates, force)
     ignores = dst / '.gitignore'
     lines = ignores.read_text(encoding='utf-8').splitlines() if ignores.exists() else []
-    wanted = ['.ai-nest/', '__pycache__/', '*.pyc', '.pytest_cache/', '.DS_Store', 'node_modules/', 'dist/', 'build/', 'coverage/']
+    wanted = ['.ai-nest/', *GENERATED_IGNORES]
     missing = [rule for rule in wanted if rule not in lines]
     if local:
         exclude = write_local_excludes(dst, tracked)
@@ -354,7 +376,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     manifest = dst / 'scripts' / 'verify.config.json'
     if not manifest.is_file():
         print('\nACTION REQUIRED: scripts/verify.config.json is not configured.')
-        print(f'  rerun with --template {{{",".join(TEMPLATES)}}}, or:')
+        print(f'  rerun with --template NAME[:FOLDER] ({", ".join(TEMPLATES)}), or:')
         print('  cp scripts/verify.config.json.example scripts/verify.config.json')
         print('  Edit checks and required_suites for your project; no tests are assumed to pass.')
     if local:
@@ -363,25 +385,136 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     else:
         print('\nNext: configure real project checks and setup commands, review policy, commit, then run:')
         print('  git add -A && git diff --cached --stat  # REVIEW before committing')
+    try:
+        checks = json.loads(manifest.read_text(encoding='utf-8')).get('checks', [])
+    except (OSError, ValueError, AttributeError):
+        checks = []
+    missing = sorted({c.get('cwd', '.') for c in checks if isinstance(c, dict) and not (dst / c.get('cwd', '.')).is_dir()})
+    if missing:  # greenfield: the configured project folders do not exist yet
+        print(f'  python ai_nest/cli.py bootstrap --provider claude --allow-host-execution "<what to build>"  # creates {", ".join(missing)}')
     print('  bash scripts/verify.sh --list')
     print('  python ai_nest/cli.py doctor --provider codex')
+
+
+# First match per folder wins, so the more specific stack comes first.
+STACK_MARKERS = [('angular', ('angular.json',)), ('python-uv', ('uv.lock',)),
+                 ('python', ('pyproject.toml', 'requirements.txt', 'setup.py')),
+                 ('typescript', ('tsconfig.json', 'package.json')), ('java-maven', ('pom.xml',)),
+                 ('java-gradle', ('build.gradle', 'build.gradle.kts')), ('go', ('go.mod',)),
+                 ('dotnet', ('*.csproj', '*.sln'))]
+LARGE_FILE_BYTES = 5 * 1024 * 1024
+
+
+def git_out(dst: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(['git', *args], cwd=dst, capture_output=True, text=True)
+
+
+def detect_stacks(dst: Path) -> list[str]:
+    """Template suggestions for projects at the root or one folder below it."""
+    folders = [dst, *sorted(p for p in dst.iterdir() if p.is_dir() and not p.name.startswith('.')
+                            and p.name not in ('node_modules', 'ai_nest', 'scripts'))]
+    found = []
+    for folder in folders:
+        for name, markers in STACK_MARKERS:
+            if any(next(folder.glob(m), None) for m in markers):
+                found.append(name if folder == dst else f'{name}:{folder.name}')
+                break
+    return found
+
+
+def large_paths(dst: Path) -> list[tuple[str, int]]:
+    """Ignore rules for big files in a repository without commits, grouped by top-level folder."""
+    rules = {}
+    for root, dirs, files in os.walk(dst):
+        dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', '.venv')]
+        for name in files:
+            path = Path(root) / name
+            if path.stat().st_size >= LARGE_FILE_BYTES and git_out(dst, 'check-ignore', '-q', str(path)).returncode:
+                rel = path.relative_to(dst)
+                rule = f'/{rel.parts[0]}/' if len(rel.parts) > 1 else f'/{rel}'
+                rules[rule] = rules.get(rule, 0) + path.stat().st_size
+    return sorted(rules.items())
+
+
+def guided_setup(args) -> int:
+    """Ask what a bare install leaves open; --yes takes the defaults, a script without --yes changes nothing extra."""
+    interactive = sys.stdin.isatty() and not args.yes
+
+    def ask(question: str, default: str) -> str:
+        if not interactive:
+            return default if args.yes else ''
+        try:
+            return input(f'{question} ').strip() or default
+        except (EOFError, KeyboardInterrupt):
+            raise RuntimeError('Setup cancelled') from None
+
+    def confirm(question: str, default: bool) -> bool:
+        return ask(f'{question} [{"Y/n" if default else "y/N"}]', 'y' if default else 'n').lower().startswith('y')
+
+    dst = args.repository.resolve()
+    if git_out(dst, 'rev-parse', '--show-toplevel').returncode:
+        if not confirm(f'{dst} is not a Git repository. Run git init?', True):
+            raise RuntimeError('Destination must be an existing Git repository (or pass --yes to run git init)')
+        git_out(dst, 'init', '-q')
+        print(f'Initialized Git repository in {dst}')
+    fresh = bool(git_out(dst, 'rev-parse', '--verify', '-q', 'HEAD').returncode)
+    if fresh:
+        big = large_paths(dst)
+        listing = '\n  '.join(f'{rule}  ({size // (1024 * 1024)} MB)' for rule, size in big)
+        if big and confirm(f'These large files should not go into Git:\n  {listing}\nAdd them to .gitignore?', True):
+            with (dst / '.gitignore').open('a', encoding='utf-8') as f:
+                f.write(''.join(f'{rule}\n' for rule, _ in big))
+    if interactive and not args.local and not args.update_code:
+        args.local = confirm('Keep AI Nest out of the project history (local install, nothing to commit)?', True)
+    templates = args.template
+    while not templates and not (dst / 'scripts' / 'verify.config.json').exists():
+        suggested = ' '.join(detect_stacks(dst))
+        answer = ask(f'Which stacks should the checks cover? Enter NAME[:FOLDER] values ({", ".join(TEMPLATES)}),\n'
+                     f'for example "python-uv:app angular:frontend". Empty = configure later. [{suggested}]', suggested)
+        try:
+            templates = [template_spec(value) for value in answer.split()]
+            break
+        except argparse.ArgumentTypeError as ex:
+            if not interactive:
+                raise RuntimeError(str(ex)) from ex
+            print(ex)
+    install(dst, args.force, args.update_code, args.local, templates)
+    if fresh:
+        who = ' '.join(git_out(dst, 'config', key).stdout.strip() for key in ('user.name', 'user.email'))
+        if confirm(f'\nCreate the first commit of the current files as "{who}"?', True):
+            git_out(dst, 'add', '-A')
+            commit = git_out(dst, 'commit', '-qm', 'Initial commit')
+            print('Created the first commit.' if commit.returncode == 0 else f'Commit failed: {commit.stderr.strip()}')
+    clean = not git_out(dst, 'status', '--porcelain').stdout and not git_out(dst, 'rev-parse', '--verify', '-q', 'HEAD').returncode
+    if interactive and clean and (dst / 'scripts' / 'verify.config.json').exists() and confirm(
+            '\nScaffold the project now with the AI bootstrap agent? It runs an AI agent that executes commands '
+            'on this machine, so use a disposable environment.', False):
+        provider = ask('Provider (claude/codex)? [claude]', 'claude')
+        request = ask('What should it build? [Scaffold the project described in the repository docs]',
+                      'Scaffold the project described in the repository docs')
+        return subprocess.run([sys.executable, 'ai_nest/cli.py', 'bootstrap', '--provider', provider,
+                               '--allow-host-execution', request], cwd=dst).returncode
+    return 0
 
 
 def main():
     p = argparse.ArgumentParser(description='Install portable AI Engineering Nest into a Git repo')
     p.add_argument('repository', type=Path)
+    p.add_argument('--yes', action='store_true',
+                   help='Do not prompt: run git init, ignore large files, use detected stacks and make the first commit')
     p.add_argument('--force', action='store_true', help='Replace AI Nest core/config files (never replaces existing instruction bridges)')
     p.add_argument('--update-code', action='store_true',
                    help='Upgrade runtime, skills, verifier and docs; migrate supported v1 config with a backup, preserve other settings and instructions')
     p.add_argument('--local', action='store_true',
                    help='Keep AI Nest out of the project history: list its files in .git/info/exclude and never modify tracked files')
-    p.add_argument('--template', choices=TEMPLATES, help='Write scripts/verify.config.json from a stack template')
+    p.add_argument('--template', type=template_spec, action='append', metavar='NAME[:FOLDER]',
+                   help=f'Write scripts/verify.config.json from stack templates ({", ".join(TEMPLATES)}); '
+                        'repeat for several stacks, e.g. --template python-uv:app --template angular:frontend')
     args = p.parse_args()
     if not args.repository.is_dir():
         p.error('Directory does not exist')
     try:
-        install(args.repository, args.force, args.update_code, args.local, args.template)
-        return 0
+        return guided_setup(args)
     except (RuntimeError, OSError) as ex:
         print(f'Installation blocked: {ex}', file=sys.stderr)
         return 1

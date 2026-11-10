@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "nest_setup_commands": [
+    {
+      "name": "uv-sync",
+      "argv": [
+        "uv",
+        "sync",
+        "--locked"
+      ],
+      "cwd": "."
+    }
+  ],
+  "required_suites": [
+    "static",
+    "unit"
+  ],
+  "checks": [
+    {
+      "name": "lint",
+      "suite": "static",
+      "cwd": ".",
+      "argv": [
+        "uv",
+        "run",
+        "--locked",
+        "ruff",
+        "check",
+        "."
+      ],
+      "timeout_seconds": 120
+    },
+    {
+      "name": "unit",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "uv",
+        "run",
+        "--locked",
+        "pytest",
+        "-q"
+      ],
+      "timeout_seconds": 600
+    }
+  ]
+}

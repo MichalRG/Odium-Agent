@@ -7,6 +7,8 @@ Provider-independent Python orchestrator for **Codex CLI** and **Claude Code CLI
 Requirements: Python 3.11+, Git, Bash, and one supported provider CLI. **Run generated code only in an isolated, credential-free VM/container.** Git worktrees are not security boundaries.
 
 ```bash
+# Guided setup in a terminal: asks what it should do and shows the defaults
+python /path/to/odium-agent/install.py /your/folder
 # Recommended: local install, nothing is added to the project's Git history
 python /path/to/odium-agent/install.py /your/git/repo --local --template python
 # Committed install (Nest files are committed, CI workflow included):
@@ -15,13 +17,28 @@ python /path/to/odium-agent/install.py /your/git/repo --template python
 python /path/to/odium-agent/install.py /your/git/repo --update-code
 ```
 
-**Local install (`--local`).** The installer lists every Nest file in `.git/info/exclude` (a per-clone ignore file that is never committed) and never modifies files the project tracks: an existing `AGENTS.md`, `CLAUDE.md`, `.gitignore` or `.claude/settings.json` is left as it is. `git status` stays clean, so there is nothing to commit. The orchestrator copies its trusted files (`scripts/verify.*`, `nest.config.json`, instruction files) into every worktree and blocks an agent stage that changes or deletes them, because Git cannot see edits to excluded files. Limits: the Nest exists only in this clone (each developer or container installs it), there is no AI Nest CI job, and to commit a file of your own at an excluded path (for example a new `AGENTS.md`) use `git add -f` or remove its line from the `AI Nest local install` block. To uninstall, delete the files listed in that block and the block itself.
+**Guided setup.** Run in a terminal, the installer asks about everything the flags leave open:
+- whether to run `git init` when the folder is not a repository;
+- whether to add files of 5 MB or more to `.gitignore` while the repository has no commits;
+- whether to use a local install;
+- which stacks to configure (`NAME[:FOLDER]`), suggesting the ones it detects in the root and first-level folders;
+- whether to make the first commit, showing the Git identity it will use;
+- whether to start `bootstrap`. This one defaults to no, because it runs an AI agent.
 
-**Verify templates (`--template`).** Writes `scripts/verify.config.json` from `ai_nest/templates/verify/<name>.json`; an existing file is kept unless `--force`. Then edit commands and `cwd` for your layout (for example `backend/`, `frontend/`).
+Without a terminal (scripts, CI, agents), it asks nothing and does nothing extra, and a folder without Git stays an error. `--yes` takes the defaults without asking: `git init`, ignore large files, the detected stacks and the first commit. It never starts `bootstrap`. An agent should ask the user first, then call for example `install.py <folder> --local --yes --template python-uv:app`.
+
+**Local install (`--local`).** The installer lists every Nest file in `.git/info/exclude` (a per-clone ignore file that is never committed) and never modifies files the project tracks: an existing `AGENTS.md`, `CLAUDE.md`, `.gitignore` or `.claude/settings.json` is left as it is. It adds the same build-output rules as committed mode (`__pycache__/`, `node_modules/`, `dist/` and so on) to that block. `git status` stays clean, so there is nothing to commit. The orchestrator copies its trusted files (`scripts/verify.*`, `nest.config.json`, instruction files) into every worktree and blocks an agent stage that changes or deletes them, because Git cannot see edits to excluded files. Limits: the Nest exists only in this clone (each developer or container installs it), there is no AI Nest CI job, and to commit a file of your own at an excluded path (for example a new `AGENTS.md`) use `git add -f` or remove its line from the `AI Nest local install` block. To uninstall, delete the files listed in that block and the block itself.
+
+**Verify templates (`--template NAME[:FOLDER]`).** Writes `scripts/verify.config.json` from `ai_nest/templates/verify/<name>.json`; an existing file is kept unless `--force`. `FOLDER` sets the `cwd` of every check and setup command. Repeat the option for a repository with several stacks; check names then get the folder as a prefix (`app-unit`, `frontend-build`):
+
+```bash
+python /path/to/odium-agent/install.py /your/git/repo --local --template python-uv:app --template angular:frontend
+```
 
 | Template | Checks | Notes |
 |---|---|---|
 | `python` | `ruff check .`, `pytest -q tests` | needs ruff and pytest in the active environment |
+| `python-uv` | `uv run --locked ruff check .`, `uv run --locked pytest -q` | adds `uv sync --locked`; ruff and pytest are dev dependencies |
 | `java-maven` | `mvn -B -ntp test`, `mvn -DskipTests package` | Maven downloads dependencies itself |
 | `java-gradle` | `./gradlew test`, `./gradlew assemble` | uses the project's Gradle wrapper |
 | `typescript` | `tsc --noEmit`, `npm test`, `npm run build` | also adds `npm ci` to `environment.setup_commands` |
@@ -74,7 +91,7 @@ python ai_nest/cli.py doctor --provider codex
 python -m unittest discover -s ai_nest/selftests -p 'test_*.py' -q  # installed runtime regression suite
 ```
 
-Commit all installed/configured files before running. `git status --short` must be clean; only committed `HEAD` is used for new worktrees. The installer appends `.ai-nest/`, `__pycache__/`, `.DS_Store`, `node_modules/`, and common build caches to `.gitignore` without overwriting existing ignore rules. Do **not** commit secrets.
+Commit all installed/configured files before running. `git status --short` must be clean; only committed `HEAD` is used for new worktrees. A committed install appends `.ai-nest/`, `__pycache__/`, `.DS_Store`, `node_modules/`, and common build caches to `.gitignore` without overwriting existing ignore rules. Do **not** commit secrets.
 
 ```bash
 # Move any extracted ai-nest-complete-v*/ folder OUTSIDE this repository first.
@@ -90,6 +107,17 @@ python ai_nest/cli.py run --provider codex --session projects-pagination \
   --allow-host-execution "Implement project pagination"
 # or --provider claude
 ```
+
+### Start from an empty project (`bootstrap`)
+
+Feature runs need a working baseline, and their agents may not create build files. For a greenfield repository, first configure the checks for the project you want (for example with `--template python-uv:app`), make one commit (`git commit --allow-empty -m "Initial commit"` is enough in a local install), then let the Nest scaffold it:
+
+```bash
+python ai_nest/cli.py bootstrap --provider claude --allow-host-execution \
+  "Scaffold the uv app in app/ as described in docs/architecture.md"
+```
+
+`bootstrap` runs explore, specify and plan, then one scaffolding agent that sees the exact check and setup commands. It may **create** build files, lockfiles, a `.gitignore` per project folder and one smoke test per test runner. It may not modify or delete existing build, test or gate files, and never touches Nest files. The orchestrator refuses to start when the baseline already passes, blocks changes that contain `node_modules/`, `.venv/` or `__pycache__/`, verifies the result in a fresh checkout with your setup commands and always runs the security reviewer, because the scaffold adds dependencies. The report lists `created_protected_files`: review them before you commit, because from then on they are protected gates. TDD is skipped for this run only. The agent needs network access for the package managers (Codex: the bootstrap stage enables sandbox network access). Add a second stack later the same way: add its checks, commit, run `bootstrap` again.
 
 Skill invocation: Codex `$build-feature ...` or Claude Code `/build-feature ...`. For long-running commands, use a terminal/job runner that supports the complete CLI lifetime; a single Claude Code Bash tool call may time out. Do not assume a skill invocation itself is an external durable job.
 

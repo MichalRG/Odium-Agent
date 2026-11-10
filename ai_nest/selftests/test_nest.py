@@ -420,6 +420,44 @@ class V41PolicyTests(unittest.TestCase):
         with self.assertRaises(nest.Blocked):
             nest.validate_red_result(result,['test_new'],cfg={'tdd':{'accepted_red_exit_codes':[1,2]}})
 
+class BootstrapPolicyTests(unittest.TestCase):
+    """Greenfield scaffolds may ADD build files and smoke tests; existing ones and Nest gates stay immutable."""
+    def check(self, writes, role='bootstrap'):
+        cfg = json.loads((nest.ROOT / 'nest.config.json').read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, 'init', '-q')
+            for name in ('pyproject.toml', 'tests/test_old.py', 'README.md'):
+                (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                (repo / name).write_text('old\n')
+            git(repo, 'add', '.')
+            git(repo, '-c', 'user.email=t@example.invalid', '-c', 'user.name=t', 'commit', '-qm', 'base')
+            for name in writes:
+                (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                (repo / name).write_text('new\n')
+            return nest.assert_authorized_changes(repo, cfg, role)
+
+    def test_new_build_files_lockfiles_and_smoke_tests_are_allowed(self):
+        writes = ['app/pyproject.toml', 'app/uv.lock', 'app/.gitignore', 'app/src/odium/__init__.py',
+                  'app/tests/test_smoke.py', 'frontend/package.json', 'frontend/package-lock.json',
+                  'frontend/angular.json', 'frontend/src/app/app.spec.ts', 'README.md']
+        self.assertEqual(sorted(self.check(writes)), sorted(writes))
+
+    def test_existing_build_and_test_files_and_gates_stay_blocked(self):
+        for name in ('pyproject.toml', 'tests/test_old.py', 'scripts/setup.sh', 'nest.config.json',
+                     '.github/workflows/ci.yml', 'ai_nest/cli.py', 'AGENTS.md', '.claude/settings.json'):
+            with self.assertRaises(nest.Blocked, msg=name):
+                self.check([name])
+
+    def test_dependency_output_is_rejected(self):
+        with self.assertRaisesRegex(nest.Blocked, 'gitignore'):
+            self.check(['frontend/node_modules/x/index.js'])
+
+    def test_feature_coder_still_cannot_create_build_files(self):
+        with self.assertRaises(nest.Blocked):
+            self.check(['app/pyproject.toml'], role='coder')
+
+
 class V41TimeoutTests(unittest.TestCase):
     def test_outer_verify_timeout_must_cover_inner_check_budgets(self):
         with tempfile.TemporaryDirectory() as tmp:

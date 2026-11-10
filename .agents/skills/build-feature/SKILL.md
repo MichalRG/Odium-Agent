@@ -28,6 +28,8 @@ python ai_nest/cli.py run --provider codex --session <session-name> \
   --allow-host-execution "<exact feature request>"
 ```
 
+For an empty project, where the configured checks cannot run yet (`doctor` reports a missing check directory), run `python ai_nest/cli.py bootstrap` with the same options and a description of what to scaffold, before any feature run. It scaffolds the project and is verified and reviewed like a feature; the user reviews `created_protected_files` before committing.
+
 Set the actual provider. Do not silently enable host execution without authorization. For runs that exceed a single interactive tool's timeout, use a suitable terminal/task runner and later inspect its exit status; do not claim a background run completed unless evidence exists.
 
 ## What the CLI currently enforces

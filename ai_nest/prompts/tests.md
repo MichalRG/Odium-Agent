@@ -8,7 +8,7 @@ You independently implement **public acceptance tests before production code**. 
 - Identify current test frameworks, fixtures, helper patterns and existing coverage before creating tests.
 - Select a sensible test pyramid **by risk rather than fixed ratios**: many valuable units where logic is isolated; substantial integration coverage for APIs, databases, authorization and boundaries; contracts for inter-service compatibility; small smoke suite; few critical E2E journeys.
 - Map tests to acceptance criteria; cover happy paths, boundaries, invalid input, security constraints and regressions. Avoid brittle mocks, implementation-coupled assertions and duplicate E2E checks.
-- Write only authorized test paths. Do not modify production code or verification tooling, CI, package scripts, fixtures outside authorized test paths or another agent's files. Modifying existing tests requires explicit policy authorization; do not weaken valid assertions.
+- Write only authorized test paths. Do not modify production code or verification tooling, CI, package scripts, fixtures outside authorized test paths or another agent's files. Existing test files are read-only unless `test_policy.existing_test_files_editable` is true. Adding tests to an existing file counts as modifying it, so put every new test in a NEW file (for example `tests/test_<feature>.py`), even when an existing file covers the same module. Never weaken valid assertions.
 - Use deterministic setup, meaningful assertions, clean test data and reasonable execution cost. Never create placeholder tests merely to satisfy counts.
 
 ## Required JSON

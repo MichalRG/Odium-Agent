@@ -43,14 +43,15 @@ class SessionStore:
     # Avoid providing independent test cases to the coding worker, even indirectly.
     READABLE_STAGES = {
         'explore': (),
-        'specify': ('explore', 'specify', 'plan', 'implement'),
-        'plan': ('explore', 'specify', 'plan', 'implement'),
+        'specify': ('explore', 'specify', 'plan', 'implement', 'bootstrap'),
+        'plan': ('explore', 'specify', 'plan', 'implement', 'bootstrap'),
         'tests': ('explore', 'specify', 'plan'),
         'protected_tests': ('explore', 'specify', 'plan'),
-        'implement': ('explore', 'specify', 'plan', 'implement', 'repair'),
-        'repair': ('explore', 'specify', 'plan', 'implement', 'repair'),
-        'review': ('explore', 'specify', 'plan', 'tests', 'implement', 'repair', 'review'),
-        'security_review': ('explore', 'specify', 'plan', 'implement', 'repair', 'review', 'security_review'),
+        'implement': ('explore', 'specify', 'plan', 'implement', 'repair', 'bootstrap'),
+        'bootstrap': ('explore', 'specify', 'plan', 'bootstrap'),
+        'repair': ('explore', 'specify', 'plan', 'implement', 'repair', 'bootstrap'),
+        'review': ('explore', 'specify', 'plan', 'tests', 'implement', 'repair', 'bootstrap', 'review'),
+        'security_review': ('explore', 'specify', 'plan', 'implement', 'repair', 'bootstrap', 'review', 'security_review'),
     }
 
     def __init__(self, repo: Path, name: str, run_id: str, base_commit: str):

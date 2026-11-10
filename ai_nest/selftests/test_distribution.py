@@ -237,7 +237,8 @@ class DistributionTests(unittest.TestCase):
                                'verify', '--allow-host-execution')
         self.assertEqual(orchestrated.returncode, 0, orchestrated.stdout + orchestrated.stderr)
         self.assertTrue((self.repo / '.ai-nest/verify-report.json').is_file())
-        test.write_text(test.read_text().replace('2 + 2, 4', '2 + 2, 5'))
+        # A same-size edit within one second can reuse a stale .pyc; change the size.
+        test.write_text(test.read_text().replace('2 + 2, 4', '2 + 2, 40'))
         self.assertEqual(command(self.repo, 'bash', 'scripts/verify.sh').returncode, 1)
         self.assertEqual(command(self.repo, sys.executable, 'ai_nest/cli.py',
                                  'verify', '--allow-host-execution').returncode, 1)
@@ -311,6 +312,42 @@ class V2SafetyMigrationTests(unittest.TestCase):
             self.assertTrue(list((repo/'.ai-nest/config-backups').glob('nest.config.*.json')))
 
 
+class GuidedSetupTests(unittest.TestCase):
+    """A bare folder becomes a ready repository; scripts never get prompts or unasked side effects."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'project'
+        (self.root / 'book').mkdir(parents=True)
+        (self.root / 'book/novel.epub').write_bytes(b'0' * (5 * 1024 * 1024))
+        (self.root / 'app').mkdir()
+        (self.root / 'app/pyproject.toml').write_text('[project]\nname = "x"\n')
+        (self.root / 'app/uv.lock').write_text('version = 1\n')
+        (self.root / 'notes.md').write_text('planning\n')
+        self.env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+                    'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid'}
+
+    def setup(self, *extra):
+        return subprocess.run([sys.executable, str(ROOT / 'install.py'), str(self.root), '--local', *extra],
+                              capture_output=True, text=True, env=self.env, stdin=subprocess.DEVNULL, timeout=60)
+
+    def test_yes_initializes_git_ignores_large_files_detects_stack_and_commits(self):
+        p = self.setup('--yes')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('/book/', (self.root / '.gitignore').read_text().splitlines())
+        tracked = command(self.root, 'git', 'ls-files').stdout.splitlines()
+        self.assertEqual(sorted(tracked), ['.gitignore', 'app/pyproject.toml', 'app/uv.lock', 'notes.md'])
+        self.assertEqual(command(self.root, 'git', 'status', '--porcelain').stdout, '')
+        checks = json.loads((self.root / 'scripts/verify.config.json').read_text())['checks']
+        self.assertEqual({(c['name'], c['cwd']) for c in checks}, {('lint', 'app'), ('unit', 'app')})
+
+    def test_script_without_yes_never_runs_git_init(self):
+        p = self.setup()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn('--yes', p.stderr)
+        self.assertFalse((self.root / '.git').exists())
+
+
 class LocalInstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -348,6 +385,23 @@ class LocalInstallTests(unittest.TestCase):
         cfg = json.loads((self.repo / 'nest.config.json').read_text())
         self.assertEqual(cfg['environment']['setup_commands'][0]['argv'][:2], ['npm', 'ci'])
         self.assertNotIn('nest_setup_commands', json.loads((self.repo / 'scripts/verify.config.json').read_text()))
+
+    def test_templates_combine_stacks_in_folders(self):
+        self.install('--template', 'python-uv:app', '--template', 'angular:frontend/')
+        data = json.loads((self.repo / 'scripts/verify.config.json').read_text())
+        self.assertEqual([(c['name'], c['cwd']) for c in data['checks']],
+                         [('app-lint', 'app'), ('app-unit', 'app'), ('frontend-unit', 'frontend'),
+                          ('frontend-build', 'frontend')])
+        self.assertEqual(data['required_suites'], ['static', 'unit', 'build'])
+        setup = json.loads((self.repo / 'nest.config.json').read_text())['environment']['setup_commands']
+        self.assertEqual([(c['name'], c['cwd'], c['argv'][:2]) for c in setup],
+                         [('app-uv-sync', 'app', ['uv', 'sync']), ('frontend-npm-ci', 'frontend', ['npm', 'ci'])])
+
+    def test_template_folder_must_stay_inside_repository(self):
+        for value in ('python:../x', 'python:/abs', 'nope:app'):
+            p = command(self.repo, sys.executable, str(ROOT / 'install.py'), str(self.repo), '--local', '--template', value)
+            self.assertEqual(p.returncode, 2, value + p.stderr)
+            self.assertFalse((self.repo / 'scripts/verify.config.json').exists())
 
     def test_every_template_is_a_valid_manifest_with_a_unit_suite(self):
         limit = json.loads((ROOT / 'nest.config.json').read_text())['limits']['check_timeout_seconds']

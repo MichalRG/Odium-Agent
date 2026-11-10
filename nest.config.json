@@ -40,6 +40,11 @@
       "*.lock",
       "install.py"
     ],
+    "bootstrap_creatable_paths": [
+      ".gitignore",
+      "*.lock",
+      "requirements*.txt"
+    ],
     "protected_basenames": [
       ".ruff.toml",
       "angular.json",

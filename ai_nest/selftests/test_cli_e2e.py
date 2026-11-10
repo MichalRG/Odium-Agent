@@ -88,7 +88,18 @@ elif '# Role: coder repair' in prompt:
     assert (base/'tests/test_feature.py').read_text().find('assertEqual')!=-1
     (base/'calc.py').write_text('def add(a,b):\n    return a+b\n')
     result = {'summary':'repaired', 'files_modified':['calc.py']}
-elif '# Role: code-reviewer' in prompt:
+elif '# Role: bootstrapper' in prompt:
+    if scenario == 'bootstrap_gate_edit' and 'worker_policy_or_execution_error' not in prompt:
+        (base/'scripts/bootstrap.sh').write_text('#!/bin/sh\n')  # a Nest gate path, never creatable
+    files = {'app/pyproject.toml': '[project]\nname = "app"\n', 'app/uv.lock': 'version = 1\n',
+             'app/.gitignore': '__pycache__/\n', 'app/calc.py': 'def add(a,b):\n    return a+b\n',
+             'app/tests/test_smoke.py': 'import unittest\nfrom calc import add\nclass TestSmoke(unittest.TestCase):\n'
+                                        '    def test_add(self):\n        self.assertEqual(add(1,2),3)\n'}
+    for rel, data in files.items():
+        (base/rel).parent.mkdir(parents=True, exist_ok=True)
+        (base/rel).write_text(data)
+    result = {'summary':'scaffolded', 'files_modified':sorted(files)}
+elif '# Role: code-reviewer' in prompt or '# Role: security-reviewer' in prompt:
     result = {'approved':True,'findings':[],'summary':'approved'}
 else:
     raise SystemExit('Unrecognized stage in fake provider')
@@ -164,6 +175,61 @@ class EndToEndTests(unittest.TestCase):
                     self.assertTrue(list(reports[0].parent.glob('artifacts/explore*.stdout.log')))
                 if scenario == 'red_invalid':
                     self.assertIn('RED', report['error'])
+
+    def run_bootstrap(self, scenario, greenfield=True):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        tmp = handle.name
+        root = Path(tmp) / 'project'
+        root.mkdir()
+        cmd(root, 'git', 'init', '-q')
+        cmd(root, 'git', 'config', 'user.email', 'test@example.invalid')
+        cmd(root, 'git', 'config', 'user.name', 'Test')
+        self.assertEqual(cmd(root, sys.executable, str(ROOT / 'install.py'), str(root), '--local').returncode, 0)
+        (root / 'docs.md').write_text('Planning docs only; no code yet.\n')
+        if not greenfield:
+            (root / 'app/tests').mkdir(parents=True)
+            (root / 'app/tests/test_ok.py').write_text('import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): pass\n')
+        (root / 'scripts/verify.config.json').write_text(json.dumps({
+            'version': 1, 'required_suites': ['unit'],
+            'checks': [{'name': 'unit', 'suite': 'unit', 'cwd': 'app',
+                        'argv': [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v']}]}))
+        cfg = json.loads((root / 'nest.config.json').read_text())
+        cfg['limits']['max_repair_attempts'] = 1
+        (root / 'nest.config.json').write_text(json.dumps(cfg))
+        cmd(root, 'git', 'add', '.')
+        self.assertEqual(cmd(root, 'git', 'commit', '-qm', 'base').returncode, 0)
+        bin_path = Path(tmp) / 'bin'
+        bin_path.mkdir()
+        (bin_path / 'codex').write_text(FAKE.replace('PYTHON', sys.executable, 1))
+        (bin_path / 'codex').chmod(0o755)
+        env = {**os.environ, 'PATH': str(bin_path) + os.pathsep + os.environ['PATH'], 'NEST_FAKE_SCENARIO': scenario}
+        p = cmd(root, sys.executable, 'ai_nest/cli.py', 'bootstrap', '--provider', 'codex',
+                '--allow-host-execution', 'Scaffold the app', env=env)
+        report = json.loads(next((root / '.ai-nest/runs').glob('*/report.json')).read_text())
+        return p, report, root
+
+    def test_bootstrap_creates_greenfield_skeleton(self):
+        p, report, root = self.run_bootstrap('bootstrap')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((report['status'], report['mode'], report['attempts']), ('verified', 'bootstrap', 1))
+        self.assertEqual(report['created_protected_files'], ['app/pyproject.toml', 'app/uv.lock'])
+        self.assertIn('app/tests/test_smoke.py', report['code_files'])
+        self.assertTrue(report['agent_routing'][-1]['invoked'])
+        self.assertIn('bootstrap_adds_dependencies', report['agent_routing'][-1]['reason'])
+        self.assertTrue((Path(report['worktree']) / 'app/pyproject.toml').is_file())
+        self.assertEqual(cmd(root, 'git', 'status', '--porcelain').stdout, '')
+
+    def test_bootstrap_gate_edit_is_blocked_then_repaired(self):
+        p, report, _ = self.run_bootstrap('bootstrap_gate_edit')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(report['attempts'], 2)
+        self.assertNotIn('scripts/bootstrap.sh', report['code_files'])
+
+    def test_bootstrap_refuses_when_baseline_already_passes(self):
+        p, report, _ = self.run_bootstrap('bootstrap', greenfield=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('Baseline already passes', report['error'])
 
     def test_nested_test_support_files_are_allowed(self):
         self.run_scenario('new_nested_fixture')

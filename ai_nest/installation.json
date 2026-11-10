@@ -1,19 +1,19 @@
 {
   "release": "4.4",
   "mode": "committed",
-  "generated_at": "2026-11-09T21:28:03.739386+00:00",
+  "generated_at": "2026-11-10T09:38:49.688464+00:00",
   "files": {
     "ai_nest/cli.py": {
       "status": "installed",
-      "sha256": "7a0497711dc012b8c3bce1c032f89cabc00f8e70bef8302b75d31a6eacc78981"
+      "sha256": "33c91e5d38ff81f280ad0a10e93c4e549e9eb64e7e5d99363ea096fe9f6cdfff"
     },
     "ai_nest/memory.py": {
       "status": "installed",
-      "sha256": "ee9da0f16d9cc0c5704368b88ba326d1e22a28e471518026b51299f2b16908e1"
+      "sha256": "fa534e28b4740cbe48d3b13dfab59862e951734bf7457428960a33e2adc17294"
     },
     "install.py": {
       "status": "installed",
-      "sha256": "eb8ed1f199fedb8800fb06d4057f071b4bdf1c4aae260ffb69c53b06029bf566"
+      "sha256": "d818addcd9bc29236370b8eae807f2721076e9f725e139ec4af833cc92c54706"
     },
     "ai_nest/prompts/explore.md": {
       "status": "installed",
@@ -29,7 +29,11 @@
     },
     "ai_nest/prompts/tests.md": {
       "status": "installed",
-      "sha256": "626d52d027b8c5294e852dd3e4c35528e2ffba9f685d907d1ccd11c19adedfab"
+      "sha256": "dfabe1c732a3e13bf3fbc6aed4a2a9a52150306d18a762a5ab493ce80e46d3ce"
+    },
+    "ai_nest/prompts/bootstrap.md": {
+      "status": "installed",
+      "sha256": "cd74c1643a6e39db79cca187d6b279fe7be14545c82f3057c10f8ca60e328eaf"
     },
     "ai_nest/prompts/repair.md": {
       "status": "installed",
@@ -53,11 +57,11 @@
     },
     ".agents/skills/build-feature/SKILL.md": {
       "status": "installed",
-      "sha256": "eb6db3578de9d8e3672358389075b65b5bbe097904813e48607664ccae76076d"
+      "sha256": "ec45c476b3f5356d8854c91a6adc58963a16cbe063530e65adfeb286329af4dc"
     },
     ".claude/skills/build-feature/SKILL.md": {
       "status": "installed",
-      "sha256": "eb6db3578de9d8e3672358389075b65b5bbe097904813e48607664ccae76076d"
+      "sha256": "ec45c476b3f5356d8854c91a6adc58963a16cbe063530e65adfeb286329af4dc"
     },
     "scripts/verify.sh": {
       "status": "installed",
@@ -68,19 +72,19 @@
       "sha256": "5a91d0cff9842dc703fc38f23b834d9b2b6c0a2b799da0e0106d1b0b613abd91"
     },
     "scripts/verify.config.json.example": {
-      "status": "preserved",
+      "status": "installed",
       "sha256": "ae4ba6b31e694ca417981669182e677e258e0045d42e4d46688743d24faa04ea"
     },
     ".github/workflows/ai-nest-verify.yml": {
-      "status": "preserved",
+      "status": "installed",
       "sha256": "566b08ec9f2e924a42dceae31935838d7d0a6871115f6bdf5619ac92b2eeb022"
     },
     "nest.config.json": {
-      "status": "preserved",
-      "sha256": "96304f02333690fa77d45597042b283b2a0376776a9692687ae848b90debfa83"
+      "status": "installed",
+      "sha256": "f20e24be0033ffdaf3227c61e4477d1f0373d9d1acff8ece9a65f2827f4130d9"
     },
     ".claude/settings.json": {
-      "status": "preserved",
+      "status": "installed",
       "sha256": "78b8d8927250014870dba834d855525eed2f50978cab4b5095efea4521c2bc20"
     },
     "ai_nest/templates/verify/angular.json": {
@@ -103,6 +107,10 @@
       "status": "installed",
       "sha256": "34047c7abd3c68ee0e39fa8295328cf3a9721a00bf13080a4b9de380f5bb192d"
     },
+    "ai_nest/templates/verify/python-uv.json": {
+      "status": "installed",
+      "sha256": "24d982a06ac7f8855cf8d3835d0f3346a613273cd80910da1c160f7a20c04632"
+    },
     "ai_nest/templates/verify/python.json": {
       "status": "installed",
       "sha256": "12f293601f2223f2bf8b2fd05e3ceb69dbf727acbecaf9d0f99793274a31584f"
@@ -113,11 +121,11 @@
     },
     "ai_nest/selftests/test_nest.py": {
       "status": "installed",
-      "sha256": "4b0fdaab2d05375281e699910b80e19f3279d34a4b89e342834d6e7f1fdc5dbd"
+      "sha256": "6abbad57e4aea2580df8e1ba6885dce3fadf255200303e0547427199eabebe12"
     },
     "ai_nest/selftests/test_distribution.py": {
       "status": "installed",
-      "sha256": "9835f6292f262b52e544e60a846ada3271044b27fef41a21c9be8f724aa34a5f"
+      "sha256": "84b3d45ab8107dcbf9fc380dfe2a6dcd56ea4dad86c468e7277784c895a5906e"
     },
     "ai_nest/selftests/test_cli_smoke.py": {
       "status": "installed",
@@ -129,7 +137,7 @@
     },
     "ai_nest/selftests/test_cli_e2e.py": {
       "status": "installed",
-      "sha256": "19b81ccfe67ce6995d88ee7af7e9bb9b96ae6cfbb883bf5651426cbe5f5c2960"
+      "sha256": "d02cc4a1c69e72d61ce54620db65c441be7a2850b493124642f1a2f1583164fd"
     }
   },
   "configuration_schema": 2

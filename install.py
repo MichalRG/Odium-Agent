@@ -328,7 +328,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
                 print(note)
     doc = dst / 'AI_NEST_README.md'
     if 'AI_NEST_README.md' not in tracked and (not doc.exists() or force or update_code):
-        shutil.copy2(SOURCE / ('README.md' if (SOURCE / 'README.md').is_file() else 'AI_NEST_README.md'), doc)
+        shutil.copy2(SOURCE / 'AI_NEST_README.md', doc)
         installed.append('AI_NEST_README.md')
     for name, bridge in BRIDGES.items():
         target = dst / name

@@ -2,43 +2,6 @@
 
 Provider-independent Python orchestrator for **Codex CLI** and **Claude Code CLI**. The `build-feature` skill is only an entrypoint: the actual stage transitions and gates live in `ai_nest/cli.py`.
 
-## Flow
-
-```mermaid
-flowchart TD
-    you(["You: $build-feature + request"]) --> explore
-
-    subgraph plan_cmd ["plan · read-only"]
-        explore["Explorer<br/>map the code and docs"] --> specify["Spec writer<br/>goal, acceptance criteria, questions"]
-        specify --> planner["Planner<br/>tasks, test strategy, commits"]
-    end
-
-    specify -. questions .-> ask{{"You: answer"}}
-    ask -. plan again .-> explore
-    planner --> approve{{"You: approve the plan"}}
-    approve -. change .-> explore
-    approve --> tests
-
-    subgraph run_cmd ["run --from-plan · isolated worktrees"]
-        tests["Test engineer<br/>tests that fail first (RED)"] --> red[/"Gate: RED + lint"/]
-        red -. lint fails .-> tests
-        red --> coder["Coder<br/>make the tests pass"]
-        coder --> verify[/"Gate: verify.sh in a fresh checkout"/]
-        verify --> review["Reviewer<br/>defects, design vs standards"]
-        review -- sensitive paths --> security["Security reviewer<br/>auth, secrets, injection"]
-        verify -. fails .-> repair["Coder repair<br/>fix failures and findings"]
-        review -. findings .-> repair
-        security -. findings .-> repair
-        repair --> verify
-    end
-
-    review --> result{{"You: result + planned commits"}}
-    security --> result
-    result -- you say merge --> merge(["Commits as planned, fast-forward merge"])
-```
-
-Each box is a separate subagent: its own Codex or Claude process and model (see [Models per agent stage](#models-per-agent-stage)). Gates are checks the orchestrator runs itself. Dotted lines are loops, bounded by `limits.max_repair_attempts`.
-
 ## Install or upgrade
 
 Requirements: Python 3.11+, Git, Bash, and one supported provider CLI. **Run generated code only in an isolated, credential-free VM/container.** Git worktrees are not security boundaries.

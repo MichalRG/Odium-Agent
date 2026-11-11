@@ -7,6 +7,7 @@ preferably ephemeral and credential-free machine. --allow-host-execution opts in
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import fnmatch
@@ -51,6 +52,10 @@ class Blocked(RuntimeError):
     """A stage or mandatory gate did not pass."""
 
 
+class TimedOut(Blocked):
+    """A command ran past its time limit and was killed."""
+
+
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
 
@@ -91,8 +96,12 @@ def read_config(repo: Path) -> dict:
     return cfg
 
 
-def call(argv: list[str], cwd: Path, timeout: int = 600, input_text: str | None = None) -> subprocess.CompletedProcess:
+def call(argv: list[str], cwd: Path, timeout: int = 600, input_text: str | None = None,
+         progress=None, max_timeout: int = 0) -> subprocess.CompletedProcess:
     """Use stdin and kill the whole process group when a command times out.
+
+    With `progress`, a command still running after a `timeout` window gets another window
+    while `progress()` is true, up to `max_timeout` seconds in total.
 
     Security note: process groups are not a sandbox. Run in a disposable runner.
     """
@@ -102,24 +111,60 @@ def call(argv: list[str], cwd: Path, timeout: int = 600, input_text: str | None 
                                 env={**os.environ, 'CI': 'true'}, start_new_session=(os.name == 'posix'))
     except OSError as ex:
         raise Blocked(f'Cannot launch executable {argv[0]}: {ex}') from ex
+    elapsed, window, send = 0, timeout, input_text
     try:
-        out, err = proc.communicate(input=input_text, timeout=timeout)
-        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
-    except subprocess.TimeoutExpired as ex:
+        while True:
+            try:
+                out, err = proc.communicate(input=send, timeout=window)
+                return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+            except subprocess.TimeoutExpired as ex:
+                elapsed += window
+                if progress is None:
+                    raise TimedOut(f'Command timed out after {elapsed}s: {argv[0]}') from ex
+                if elapsed >= max_timeout:
+                    raise TimedOut(f'Command timed out after {elapsed}s: {argv[0]} '
+                                  f'(reached the {max_timeout}s cap while still making progress)') from ex
+                if not progress():
+                    raise TimedOut(f'Command timed out after {elapsed}s: {argv[0]} '
+                                  f'(no new progress in the last {window}s)') from ex
+                # The first call already handed stdin over; sending it again raises ValueError.
+                send, window = None, min(timeout, max_timeout - elapsed)
+                print(f'[AI Nest] {argv[0]} still making progress after {elapsed}s; '
+                      f'allowing {window}s more (cap {max_timeout}s)', flush=True)
+    except BaseException:
+        # Kill the group even if the leader exited: a leftover child can still hold the pipes.
         if os.name == 'posix':
-            os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
         proc.communicate()
-        raise Blocked(f'Command timed out after {timeout}s: {argv[0]}') from ex
-    except BaseException:
-        if proc.poll() is None:
-            if os.name == 'posix':
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
-            proc.communicate()
         raise
+
+
+def worktree_progress(tree: Path):
+    """Return a check that is true when the worktree reached a file state not seen before.
+
+    `git ls-files` does not take the index lock the agent may hold. Returning to an
+    earlier state (undo, edit loops) does not count as progress.
+    """
+    def state() -> str:
+        names = git(tree, 'ls-files', '-z', '--modified', '--others', '--exclude-standard').split('\0')
+        digest = hashlib.sha256()
+        for name in sorted(set(filter(None, names))):
+            path = tree / name
+            digest.update(name.encode() + b'\0'
+                          + (hashlib.sha256(path.read_bytes()).digest() if path.is_file() else b'deleted'))
+        return digest.hexdigest()
+    seen = {state()}
+
+    def check() -> bool:
+        current = state()
+        new = current not in seen
+        seen.add(current)
+        return new
+    return check
+
 
 def git(repo: Path, *args: str, timeout: int = 120) -> str:
     p = call(['git', *args], repo, timeout)
@@ -582,7 +627,11 @@ class CLIProvider:
         idx = len(list(self.artifact_dir.glob(f'{stage}_*.answer.json'))) + 1
         prefix = self.artifact_dir / f'{stage}_{idx:02d}'
         schema = schema_for(stage)
-        timeout = int(self.cfg.get('limits', {}).get('agent_timeout_seconds', 1800))
+        limits = self.cfg.get('limits', {})
+        timeout = int(limits.get('agent_timeout_seconds', 1800))
+        # A writing agent that keeps changing files gets more time, window by window, up to a cap.
+        watch = {'progress': worktree_progress(cwd),
+                 'max_timeout': int(limits.get('agent_max_seconds', 14400))} if write else {}
         if self.name == 'codex':
             sf = prefix.with_suffix('.schema.json')
             final = prefix.with_suffix('.answer.json')
@@ -592,7 +641,7 @@ class CLIProvider:
                     # Scaffolding runs package managers (uv, npm), which need the registry.
                     *(['-c', 'sandbox_workspace_write.network_access=true'] if stage == 'bootstrap' else []),
                     '--output-schema', str(sf), '--output-last-message', str(final), '-']
-            p = call(argv, cwd, timeout, input_text=prompt)
+            p = call(argv, cwd, timeout, input_text=prompt, **watch)
             raw = final.read_text(encoding='utf-8') if final.exists() else ''
         else:
             # Explicit source selection prevents user-level settings loading.
@@ -602,7 +651,7 @@ class CLIProvider:
                     '--tools', tools, '--allowedTools', tools,
                     '--permission-mode', 'dontAsk',
                     '--output-format', 'json', '--json-schema', json.dumps(schema)]
-            p = call(argv, cwd, timeout, input_text=prompt)
+            p = call(argv, cwd, timeout, input_text=prompt, **watch)
             raw = p.stdout
         stdout_log = prefix.with_suffix('.stdout.log')
         stderr_log = prefix.with_suffix('.stderr.log')
@@ -1044,19 +1093,28 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
             summary['protected_tests_sha256'] = hashlib.sha256(protected_patch.read_bytes()).hexdigest()
             summary['protected_test_count'] = len(protected_files)  # no paths in coder context
         feedback: dict = {}
+        # A block before verification resets the tree, which leaves repair nothing to fix.
+        code_in_tree = False
         max_attempts = int(cfg.get('limits', {}).get('max_repair_attempts', 2)) + 1
         for attempt in range(1, max_attempts + 1):
             print(f'[AI Nest] implementation attempt {attempt}/{max_attempts}', flush=True)
-            stage = 'bootstrap' if bootstrap else 'implement' if attempt == 1 else 'repair'
+            stage = 'bootstrap' if bootstrap else 'repair' if code_in_tree else 'implement'
+            stopped = ''
             try:
-                agent_stage(provider, session, stage, code_tree,
-                            {**context, 'specification': spec, 'plan': plan,
-                             'public_tdd': {'files': public_files, 'red_status': red_status,
-                                            'expected_red_tests': tests['expected_red_tests'],
-                                            'coder_guidance': tests['coder_guidance'],
-                                            'test_strategy': tests['test_strategy']}
-                              if public_patch else {'enabled': False},
-                             'feedback': feedback}, write=True, attempt=attempt)
+                try:
+                    agent_stage(provider, session, stage, code_tree,
+                                {**context, 'specification': spec, 'plan': plan,
+                                 'public_tdd': {'files': public_files, 'red_status': red_status,
+                                                'expected_red_tests': tests['expected_red_tests'],
+                                                'coder_guidance': tests['coder_guidance'],
+                                                'test_strategy': tests['test_strategy']}
+                                  if public_patch else {'enabled': False},
+                                 'feedback': feedback}, write=True, attempt=attempt)
+                except TimedOut as ex:
+                    # Keep the unfinished code: it still passes the checks below, and repair continues it.
+                    assert_local_files_intact(code_tree, stage)
+                    stopped = f'{stage} stopped at its time limit ({ex})'
+                    print(f'[AI Nest] attempt {attempt}: {stopped}; keeping its code for verification', flush=True)
                 if git(code_tree, 'rev-parse', 'HEAD') != base_commit:
                     raise Blocked('Coder moved HEAD away from the trusted base commit')
                 code_patch = artifacts / f'code_attempt_{attempt}.patch'
@@ -1067,10 +1125,13 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 created = {f for f in code_files if is_blocked_file(f, cfg)} if bootstrap else set()
                 security_paths(code_files, cfg, approved_new_test_fixtures=created)
             except Blocked as ex:
-                feedback = {'cause': 'worker_policy_or_execution_error', 'guidance': str(ex)[:1000]}
+                feedback = {'cause': 'worker_policy_or_execution_error',
+                            'guidance': '; '.join(filter(None, (stopped, str(ex))))[:1000]}
                 checkout_reset(code_tree, base_commit, public_patch)
+                code_in_tree = False
                 print(f'[AI Nest] attempt {attempt} blocked before verification: {ex}', flush=True)
                 continue
+            code_in_tree = True
             verification_file = artifacts / f'checks_attempt_{attempt}.json'
             try:
                 patches = [p for p in (public_patch, protected_patch) if p is not None]
@@ -1081,6 +1142,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                                    approved_new_test_fixtures=approved_fixtures | created)
                 if not validation['passed']:
                     feedback = safe_failure_feedback(validation, protected=protected_patch is not None)
+                    if stopped:
+                        feedback['previous_attempt'] = f'{stopped}. Its unfinished code is in your worktree; continue it.'
                     continue
                 # Reviewers see production code and public tests only. Hidden tests
                 # live exclusively in the transient verification checkout.

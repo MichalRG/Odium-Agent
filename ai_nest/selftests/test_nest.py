@@ -112,6 +112,40 @@ class NestTests(unittest.TestCase):
             self.assertGreater(len(payload[0][1]), 128000)
             self.assertNotIn('--ask-for-approval', payload[0][0])
 
+    def test_agent_past_its_window_keeps_running_only_while_it_makes_progress(self):
+        import contextlib
+        import io
+        slow = [sys.executable, '-c', 'import sys, time; time.sleep(0.6); print(sys.stdin.read())']
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            cwd = Path(tmp)
+            with self.assertRaisesRegex(nest.Blocked, r'timed out after 0.25s: \S+$'):
+                nest.call(slow, cwd, 0.25, input_text='x')
+            with self.assertRaisesRegex(nest.Blocked, 'no new progress'):
+                nest.call(slow, cwd, 0.25, input_text='x', progress=lambda: False, max_timeout=5)
+            with self.assertRaisesRegex(nest.Blocked, 'after 0.5s.*cap'):
+                nest.call(slow, cwd, 0.25, input_text='x', progress=lambda: True, max_timeout=0.5)
+            done = nest.call(slow, cwd, 0.25, input_text='stdin kept', progress=lambda: True, max_timeout=5)
+            self.assertEqual((done.returncode, done.stdout.strip()), (0, 'stdin kept'))
+
+    def test_worktree_progress_counts_only_file_states_not_seen_before(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            git(repo, 'init', '-q')
+            git(repo, 'config', 'user.email', 'tester@example.test')
+            git(repo, 'config', 'user.name', 'Test')
+            (repo / 'app.py').write_text('v1\n')
+            git(repo, 'add', '.')
+            git(repo, 'commit', '-qm', 'base')
+            progressed = nest.worktree_progress(repo)
+            self.assertFalse(progressed())
+            (repo / 'app.py').write_text('v2\n')
+            self.assertTrue(progressed())
+            self.assertFalse(progressed())
+            (repo / 'new.py').write_text('x\n')
+            self.assertTrue(progressed())
+            (repo / 'new.py').unlink()
+            self.assertFalse(progressed(), 'returning to an earlier state is not progress')
+
     def test_no_checks_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = {'verification': {'autodetect': False, 'commands': [], 'require_project_checks': True}}

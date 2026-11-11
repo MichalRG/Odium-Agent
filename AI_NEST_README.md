@@ -139,6 +139,8 @@ python ai_nest/cli.py plan --provider codex --session projects-pagination \
 python ai_nest/cli.py run --from-plan <plan-run-id> --provider codex --allow-host-execution
 ```
 
+Build a large request in slices: one plan, approval, run and merge per slice, all in the same `--session`, each planned after the previous slice is merged. The chat proposes slices when a plan is large. Smaller slices verify faster, get a more focused review and lose less when an attempt fails.
+
 To skip the approval, `run --session <name> --allow-host-execution "<request>"` does both steps in one command and blocks on open questions. Use `--provider claude` for Claude Code agents.
 
 ### Start from an empty project (`bootstrap`)
@@ -211,6 +213,7 @@ Includes mocked full flow with public RED/hidden-test separation, Git/worktree i
 - `cleanup.blocked_worktrees` defaults to true. Failed worktrees and temporary branches are removed after logs, patches and persistent session reports are written. Verified worktrees remain for inspection.
 - With `tdd.protected_tests=false`, sanitized public failure tails are handed to the repair agent. With protected tests enabled, all raw verification output is withheld from coder context. Protected tests are **not confidential** if all workers share unrestricted host filesystem access.
 - On Claude, the CLI uses `--setting-sources project --strict-mcp-config`. It narrows settings sources but does not guarantee user/managed plugin or tool isolation; use a disposable environment and audit project settings.
+- `limits.agent_timeout_seconds` (default 1800) is a window, not a hard stop, for stages that write files (tests, implement, repair). At the end of each window the orchestrator checks the worktree: if the files reached a state it has not seen before, the agent gets another window, up to `limits.agent_max_seconds` (default 14400) in total. If nothing changed in the last window, or the files went back to an earlier state, the agent is stopped. A coder stopped this way keeps its unfinished code: it goes through the same policy checks and verification, and `repair` continues it. Read-only stages stop after one window.
 - `limits.check_timeout_seconds` applies per **orchestrator check**, not to each check inside `scripts/verify.py`. Set the outer timeout larger than the total runtime of configured checks and their individual budgets.
 - This package ships an example verification manifest, **not working project checks**. Configure `scripts/verify.config.json`, `tdd.red_commands`, and any `environment.setup_commands` for your stack before executing features. CI runs configured setup commands and has optional requirements/npm lockfile setup; customize service dependencies and multi-workspace installations for your repository.
 
@@ -225,6 +228,7 @@ The tests use a fake CLI adapter and actual temporary Git repositories; they do 
 ## v4.4 integrity and RED policy
 
 - Every repair resets the worktree to the **original pinned `base_commit`**, not mutable `HEAD`; commits made by agents cannot survive into the result.
+- An attempt blocked before verification (policy violation, moved HEAD, no changes) is reset with nothing kept, so the next attempt runs `implement` again with the block reason as feedback. `repair` runs only on code that reached verification.
 - `tdd.protected_tests` defaults to **false**. A shared host filesystem does not keep hidden tests secret. Only enable this in separately isolated workers.
 - Missing new Python/TypeScript modules are accepted as TDD RED only when the module is present in planner `tasks[].files` and referenced by generated public tests. Missing unrelated dependencies block.
 - Test engineers may add a **new** `tests/conftest.py`; editing existing fixtures remains prohibited. Such new fixture files are permitted only when validated as test-agent additions in the local workflow; CI `verify --base` blocks them by default because it cannot verify the test-agent origin. A project may explicitly opt into added-only fixtures with `safety.allow_new_test_fixtures_in_ci=true` in a trusted base-commit policy; edits to existing fixtures remain blocked. Require human review for such new fixtures.

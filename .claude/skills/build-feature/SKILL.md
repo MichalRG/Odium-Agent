@@ -33,6 +33,7 @@ The user invokes this skill once. Carry the whole feature through this conversat
    - **2: questions.** **Checkpoint:** show the questions exactly as printed and wait for the answers. Then run `plan` again with the same session. The request is the original text, followed by `Owner answers:` and each question with its answer.
    - **0: plan ready.** **Checkpoint:** show the goal, acceptance criteria, constraints, risks and tasks from the output (the full data is in `.ai-nest/runs/<run-id>/artifacts/planning.json`). Ask the user to approve it, change it or stop.
      - For a change, run `plan` again with the same session. The request is the previous request, followed by `Owner feedback on the previous plan:` and the feedback. Then repeat this checkpoint.
+     - When the plan has more than about 5 tasks, touches more than about 10 files, or joins parts that can work on their own (for example a data model, a CLI and platform adapters), recommend building it in slices (see Slices) and propose the slices in order.
    - **1: blocked.** Report the error and stop.
 3. **Build.** Start this step only after the user approves the plan. Run:
    ```bash
@@ -41,6 +42,8 @@ The user invokes this skill once. Carry the whole feature through this conversat
    The nest writes failing public tests, implements, verifies in a fresh checkout, reviews and repairs within its budget. This step has no checkpoint. If the command says that HEAD moved, go back to step 2 and get approval for the new plan.
 4. **Result.** **Checkpoint:** report as described in Report. When the run is verified, show `git -C <worktree> diff --stat HEAD` and offer the full diff. When it is blocked, give the cause and offer to plan again in the same session with the cause as owner feedback.
 5. **Merge.** Do this only when the user tells you to. In the worktree run `git add -A` and `git commit -m "<one-line summary>"`. Then, from the repository root, run `git merge --ff-only <branch>`, `git worktree remove <worktree>` and `git branch -d <branch>`. Never push.
+
+**Slices.** A large request is built as a sequence of slices. Each slice is one full cycle of steps 2 to 5: its own plan, approval, build, result and merge. Use the same session for all slices, so that later slices see the handoffs of earlier ones. For each slice, the request is the original request, followed by `Build only this slice:` and the slice description, and then by `Already merged:` and the earlier slices. Plan a slice only after the previous slice is merged: an approved plan is pinned to the HEAD it was planned on.
 
 Each `plan` and `run` takes minutes. Run them where a tool timeout cannot stop them (for example as a background job), and wait for the exit code. Never report a result that you did not see.
 

@@ -148,6 +148,7 @@
   "limits": {
     "max_repair_attempts": 2,
     "agent_timeout_seconds": 1800,
+    "agent_max_seconds": 14400,
     "check_timeout_seconds": 4830
   },
   "models": {

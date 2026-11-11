@@ -68,7 +68,11 @@ elif '# Role: test-engineer — PUBLIC' in prompt:
               'expected_red_tests':expected, 'coder_guidance':['make test_add pass'],
               'test_strategy':{'unit': ['test_add'], 'integration': [], 'contract': [], 'e2e': [], 'smoke': []}}
 elif '# Role: coder —' in prompt:
-    if scenario == 'red_new_module':
+    if 'worker_policy_or_execution_error' in prompt:
+        # A retry after a block starts again from the reset tree, public tests intact.
+        assert (base/'tests/test_feature.py').read_text().find('assertEqual')!=-1
+        (base/'calc.py').write_text('def add(a,b):\n    return a+b\n')
+    elif scenario == 'red_new_module':
         (base/'calcx.py').write_text('def add(a,b):\n    return a+b\n')
     elif scenario == 'coder_nested_helper_edit' and '# Role: coder —' in prompt:
         (base/'tests/unit/helpers.py').write_text('VALUE = 999\n')
@@ -86,12 +90,17 @@ elif '# Role: coder —' in prompt:
         (base/'scripts/verify.sh').write_text('#!/bin/sh\nexit 0\n')
         subprocess.run(['git','add','calc.py','scripts/verify.sh'], cwd=base,check=True)
         subprocess.run(['git','commit','-qm','unauthorized'], cwd=base,check=True)
+    elif scenario == 'coder_timeout':
+        (base/'calc.py').write_text('def add(a,b):\n    return a  # unfinished\n')
+        import time; time.sleep(60)
     else:
         (base/'calc.py').write_text('def add(a,b):\n    return a+b\n')
     result = {'summary':'attempted', 'files_modified':['calc.py']}
 elif '# Role: coder repair' in prompt:
     assert (base/'tests/test_feature.py').is_file()
     assert (base/'tests/test_feature.py').read_text().find('assertEqual')!=-1
+    if scenario == 'coder_timeout':
+        assert 'stopped at its time limit' in prompt and 'unfinished' in (base/'calc.py').read_text()
     (base/'calc.py').write_text('def add(a,b):\n    return a+b\n')
     result = {'summary':'repaired', 'files_modified':['calc.py']}
 elif '# Role: bootstrapper' in prompt:
@@ -233,6 +242,22 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn('I001', report['error'])
         self.assertFalse([s for s in stages if s.startswith(('implement', 'repair'))], stages)
 
+    def test_coder_stopped_at_its_time_limit_keeps_its_code_for_repair(self):
+        root, env = self.feature_project('coder_timeout')
+        cfg = json.loads((root / 'nest.config.json').read_text())
+        cfg['limits'].update(agent_timeout_seconds=5, agent_max_seconds=5)
+        (root / 'nest.config.json').write_text(json.dumps(cfg))
+        self.assertEqual(cmd(root, 'git', 'commit', '-qam', 'short agent limits').returncode, 0)
+        p = self.nest(root, env, 'run', '--provider', 'codex', '--session', 'calc',
+                      '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('keeping its code for verification', p.stdout)
+        run_dir = next((root / '.ai-nest/runs').iterdir())
+        report = json.loads((run_dir / 'report.json').read_text())
+        self.assertEqual((report['status'], report['attempts']), ('verified', 2))
+        stages = sorted(f.name.split('.')[0] for f in (run_dir / 'artifacts').glob('*.schema.json'))
+        self.assertEqual([s for s in stages if s.startswith(('implement', 'repair'))], ['implement_01', 'repair_01'])
+
     def test_approved_plan_is_refused_after_the_code_moved(self):
         root, env = self.feature_project('happy')
         self.assertEqual(self.nest(root, env, 'plan', '--allow-host-execution', 'Fix addition').returncode, 0)
@@ -256,6 +281,11 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stdout+p.stderr)
             self.assertEqual(report['status'],'verified')
             self.assertEqual(report['attempts'], 2 if scenario in ('coder_local_gate_edit','coder_test_edit','coder_protected_edit','coder_commit','coder_nested_helper_edit') else 1)
+            if report['attempts'] == 2:
+                # Attempt 1 was blocked before verification and its tree reset, so nothing is left to repair.
+                stages = sorted(f.name.split('.')[0] for f in reports[0].parent.glob('artifacts/*.schema.json'))
+                self.assertEqual([s for s in stages if s.startswith(('implement', 'repair'))],
+                                 ['implement_01', 'implement_02'])
             if scenario == 'happy':
                 self.assertIn('verification_optimizations', report)
             if local:

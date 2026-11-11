@@ -21,6 +21,9 @@ base = Path.cwd()
 args = sys.argv[1:]
 prompt = sys.stdin.read()
 scenario = os.environ.get('NEST_FAKE_SCENARIO', 'happy')
+if os.environ.get('NEST_FAKE_ARGV'):
+    with open(os.environ['NEST_FAKE_ARGV'], 'a') as argv_log:
+        argv_log.write(json.dumps(args) + '\n')
 notes = []
 if '# Role: explorer' in prompt:
     result = {'summary':'explored', 'relevant_files':['calc.py'], 'risks':[]}
@@ -185,6 +188,18 @@ class EndToEndTests(unittest.TestCase):
         self.assertFalse((run_dir / 'artifacts/planning.json').exists())
         self.assertNotEqual(self.nest(root, env, 'run', '--from-plan', run_dir.name,
                                       '--allow-host-execution').returncode, 0)
+
+    def test_each_stage_gets_its_configured_model_and_effort(self):
+        root, env = self.feature_project('happy')
+        argv_log = root.parent / 'argv.jsonl'
+        p = self.nest(root, {**env, 'NEST_FAKE_ARGV': str(argv_log)},
+                      'plan', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        calls = [json.loads(line) for line in argv_log.read_text().splitlines()]
+        explore, plan = calls[0], calls[2]  # stage order: explore, specify, plan
+        self.assertEqual(explore[:5], ['exec', '-m', 'gpt-6-luna', '-c', 'model_reasoning_effort="high"'])
+        self.assertEqual(plan[:3], ['exec', '-m', 'gpt-6-astra'])
+        self.assertIn('[AI Nest] explore: gpt-6-luna, effort high', p.stdout)
 
     def lint_project(self, scenario):
         """Feature project whose static suite rejects unsorted `import` lines in tests, like ruff I001."""

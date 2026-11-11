@@ -534,6 +534,9 @@ def parse_result(stage: str, result: Any) -> dict:
     return result
 
 
+MODEL_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+
+
 class CLIProvider:
     def __init__(self, name: str, cfg: dict, artifact_dir: Path):
         self.name = name
@@ -543,6 +546,26 @@ class CLIProvider:
             raise Blocked(f'Unsupported provider: {name}')
         if shutil.which(name) is None:
             raise Blocked(f'{name} CLI not found in PATH')
+        models = cfg.get('models', {})
+        self.models = models.get(name, {}) if isinstance(models, dict) else None
+        # Values become CLI arguments, so only plain names (no leading '-', quotes or spaces).
+        if not (isinstance(self.models, dict) and all(
+                stage in (*SCHEMAS, 'default') and isinstance(entry, dict) and entry
+                and set(entry) <= {'model', 'effort'}
+                and all(isinstance(v, str) and MODEL_NAME.fullmatch(v) for v in entry.values())
+                for stage, entry in self.models.items())):
+            raise Blocked(f'Invalid models.{name} in nest.config.json: use agent stage names or "default", '
+                          'each with a "model" and/or "effort" name.')
+
+    def model_args(self, stage: str) -> list[str]:
+        choice = {**self.models.get('default', {}), **self.models.get(stage, {})}
+        print(f'[AI Nest] {stage}: {choice.get("model", self.name + " default model")}'
+              + (f', effort {choice["effort"]}' if 'effort' in choice else ''), flush=True)
+        model, effort = choice.get('model'), choice.get('effort')
+        if self.name == 'codex':
+            return [*(['-m', model] if model else []),
+                    *(['-c', f'model_reasoning_effort="{effort}"'] if effort else [])]
+        return [*(['--model', model] if model else []), *(['--effort', effort] if effort else [])]
 
     def run(self, stage: str, cwd: Path, task: dict, write: bool = False) -> dict:
         if stage not in SCHEMAS:
@@ -564,7 +587,7 @@ class CLIProvider:
             sf = prefix.with_suffix('.schema.json')
             final = prefix.with_suffix('.answer.json')
             write_json(sf, schema)
-            argv = ['codex', 'exec', '--sandbox',
+            argv = ['codex', 'exec', *self.model_args(stage), '--sandbox',
                     'workspace-write' if write else 'read-only',
                     # Scaffolding runs package managers (uv, npm), which need the registry.
                     *(['-c', 'sandbox_workspace_write.network_access=true'] if stage == 'bootstrap' else []),
@@ -575,7 +598,7 @@ class CLIProvider:
             # Explicit source selection prevents user-level settings loading.
             # Managed settings are still authoritative; this is NOT a sandbox.
             tools = 'Read,Glob,Grep,Edit,Write,Bash' if write else 'Read,Glob,Grep,Bash'
-            argv = ['claude', '-p', '--setting-sources', 'project', '--strict-mcp-config',
+            argv = ['claude', '-p', *self.model_args(stage), '--setting-sources', 'project', '--strict-mcp-config',
                     '--tools', tools, '--allowedTools', tools,
                     '--permission-mode', 'dontAsk',
                     '--output-format', 'json', '--json-schema', json.dumps(schema)]

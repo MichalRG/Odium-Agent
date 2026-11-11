@@ -411,6 +411,23 @@ class NestTests(unittest.TestCase):
                     "t.spec.ts(1,10): error TS2305: Module '\"./calc\"' has no exported member 'multiply'.")):
                 self.assertEqual(nest.public_tests_static_failure(tree, {}, tree / 'out.json'), '')
 
+    def test_models_per_stage_fall_back_to_default_and_reject_unsafe_values(self):
+        models = {'codex': {'default': {'model': 'gpt-6.1-sol', 'effort': 'medium'},
+                            'plan': {'model': 'gpt-6-astra', 'effort': 'high'}, 'review': {'effort': 'high'}},
+                  'claude': {'default': {'model': 'opus'}}}
+        with patch.object(nest.shutil, 'which', return_value='/bin/true'), patch('builtins.print'):
+            codex = nest.CLIProvider('codex', {'models': models}, Path('.'))
+            self.assertEqual(codex.model_args('plan'), ['-m', 'gpt-6-astra', '-c', 'model_reasoning_effort="high"'])
+            self.assertEqual(codex.model_args('review'), ['-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="high"'])
+            self.assertEqual(codex.model_args('explore'), ['-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort="medium"'])
+            self.assertEqual(nest.CLIProvider('claude', {'models': models}, Path('.')).model_args('tests'),
+                             ['--model', 'opus'])
+            self.assertEqual(nest.CLIProvider('codex', {}, Path('.')).model_args('plan'), [])
+            for bad in ({'reveiw': {'model': 'x'}}, {'plan': {'model': '--yolo'}}, {'plan': {'model': 'x', 'temp': '1'}},
+                        {'plan': {'effort': 'high"\nsandbox_mode="danger-full-access'}}, {'plan': {}}, ['plan']):
+                with self.assertRaisesRegex(nest.Blocked, 'Invalid models.codex'):
+                    nest.CLIProvider('codex', {'models': {'codex': bad}}, Path('.'))
+
     def test_extra_observations_keep_the_most_severe_instead_of_blocking(self):
         def obs(severity, n):
             return {'kind': 'fact', 'severity': severity, 'summary': f'{severity}{n}', 'evidence': 'e',

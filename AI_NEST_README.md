@@ -64,6 +64,23 @@ For fresh Node/Angular worktrees, provision dependencies with explicitly configu
 
 For Python, also install declared pinned dependencies (e.g. an appropriate `pip install -r ...` step) before verification. Test runs may execute untrusted project scripts. This is intentional and needs OS-level sandboxing.
 
+### Models per agent stage
+
+`models` in `nest.config.json` picks the model and reasoning effort for each agent stage, per provider. A stage without an entry uses `default`; a provider without entries uses its CLI's own default (for Claude Code that is the account default, because agents run with project settings only). The nest passes them as `codex exec -m <model> -c model_reasoning_effort="<effort>"` or `claude --model <model> --effort <effort>` and prints the choice for every stage.
+
+```json
+"models": {
+  "codex": {
+    "default": {"model": "gpt-6.1-sol", "effort": "medium"},
+    "explore": {"model": "gpt-6-luna", "effort": "high"},
+    "plan": {"model": "gpt-6-astra", "effort": "high"}
+  },
+  "claude": {"default": {"model": "sonnet"}, "plan": {"model": "opus"}}
+}
+```
+
+Stages: `explore`, `specify`, `plan`, `tests`, `protected_tests`, `implement`, `repair`, `bootstrap`, `review`, `security_review`. Upgrading adds the release defaults for missing entries and keeps yours. The chat that runs `$build-feature` uses your own Codex or Claude settings, not this section.
+
 ### TDD configuration
 
 The v4.4 starter has TDD enabled and requires an explicit RED command (typically a focused unit or integration test suite):

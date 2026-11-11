@@ -150,6 +150,20 @@
     "agent_timeout_seconds": 1800,
     "check_timeout_seconds": 4830
   },
+  "models": {
+    "codex": {
+      "default": {"model": "gpt-6.1-sol", "effort": "medium"},
+      "explore": {"model": "gpt-6-luna", "effort": "high"},
+      "specify": {"model": "gpt-6-astra", "effort": "high"},
+      "plan": {"model": "gpt-6-astra", "effort": "high"},
+      "tests": {"model": "gpt-6.1-sol", "effort": "high"},
+      "implement": {"model": "gpt-6.1-sol", "effort": "high"},
+      "repair": {"model": "gpt-6.1-sol", "effort": "medium"},
+      "review": {"model": "gpt-6.1-sol", "effort": "high"},
+      "security_review": {"model": "gpt-6-astra", "effort": "high"}
+    },
+    "claude": {}
+  },
   "tdd": {
     "enabled": true,
     "protected_tests": false,

@@ -135,7 +135,7 @@ Skill invocation: Codex `$build-feature ...` or Claude Code `/build-feature ...`
 
 1. Orchestrator creates run ID, named session, branch and worktrees; baseline checks run after configured dependency setup.
 2. **Explorer** investigates code and **specification writer** establishes acceptance criteria; **planner** produces task plan.
-3. **Test engineer** writes public TDD tests. The orchestrator independently runs targeted RED commands and records results. An additional protected-test engineer runs if configured.
+3. **Test engineer** writes public TDD tests. The orchestrator independently runs targeted RED commands and records results. An additional protected-test engineer runs if configured. The `static` suite of `scripts/verify.config.json` (lint) also runs on the new tests: the coder may not edit tests, so a lint failure goes back to the test engineer once, and stops the run if it persists. Failures that name missing symbols (type checkers before the code exists) are expected RED and pass on.
 4. Public tests are applied to the **coder** worktree. Coder writes production code only, while public tests remain unchanged. Failed policy checks lead to a bounded clean retry.
 5. Orchestrator combines public, protected and implementation patches in a fresh verification checkout, sets up dependencies and executes mandatory project gates.
 6. When protected tests are enabled, the orchestrator re-verifies code + **public** tests in a separate review checkout. Otherwise it checks the public patch identity and can skip a redundant second gate (configurable). Code reviewer examines final diff and evidence; high/critical findings block by default, low/medium are advisory.

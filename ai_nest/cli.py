@@ -716,6 +716,46 @@ def red_test_key(name: str) -> str:
     return re.split(r'[.#]', name)[-1] if re.fullmatch(r'[\w.$#]+', name) else name
 
 
+MISSING_SYMBOL_PATTERNS = (
+    r"cannot import name ['\"]([A-Za-z_]\w*)['\"]",
+    r"has no attribute ['\"]([A-Za-z_]\w*)['\"]",
+    r"has no exported member ['\"]([A-Za-z_]\w*)['\"]",
+    r"Property ['\"]([A-Za-z_]\w*)['\"] does not exist",
+    r"symbol:\s+(?:class|interface|enum|record|method|variable)\s+([A-Za-z_]\w*)",  # javac
+    r"undefined: ([A-Za-z_]\w*)",  # go
+    r"The (?:type or namespace )?name '([A-Za-z_]\w*)'",  # C#
+)
+MISSING_MODULE_PATTERNS = (
+    r"No module named ['\"]([^'\"\s]+)['\"]",
+    r"Cannot find module ['\"]([^'\"\s]+)['\"]",
+)
+
+
+def public_tests_static_failure(tree: Path, cfg: dict, output: Path) -> str:
+    """Log of a static check that the new public tests break and only the test engineer can fix.
+
+    The coder may not edit tests, so such a failure would only burn its repair attempts.
+    """
+    try:
+        checks = json.loads((tree / 'scripts' / 'verify.config.json').read_text(encoding='utf-8'))['checks']
+    except (OSError, ValueError, KeyError, TypeError):
+        return ''  # No verify.sh manifest: the project's own commands run only at verification.
+    if not any(isinstance(c, dict) and c.get('suite') == 'static' for c in checks):
+        return ''
+    static_cfg = {'verification': {'commands': [{'name': 'public-static', 'cwd': '.',
+                                                 'argv': ['bash', 'scripts/verify.sh', '--suite', 'static']}]},
+                  'limits': cfg.get('limits', {})}
+    result = run_checks(tree, static_cfg, output, 'static')
+    if result['passed']:
+        return ''
+    log = '\n'.join(c.get('stdout_tail', '') + '\n' + c.get('stderr_tail', '') + c.get('error', '')
+                    for c in result['checks'])
+    # Type checkers (tsc, go vet) also fail on symbols the coder has yet to add; that is expected RED.
+    if any(re.search(p, log, re.IGNORECASE) for p in MISSING_SYMBOL_PATTERNS + MISSING_MODULE_PATTERNS):
+        return ''
+    return log[-4000:]
+
+
 def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | None = None,
                         public_tree: Path | None = None, public_files: list[str] | None = None,
                         planned_files: list[str] | None = None) -> str:
@@ -745,22 +785,9 @@ def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | 
     if any(code not in ([0] + allowed) for code in codes):
         raise Blocked(f'Unexpected RED command exit code {codes}; allowed RED codes: {allowed}.')
 
-    missing_symbol_patterns = (
-        r"cannot import name ['\"]([A-Za-z_]\w*)['\"]",
-        r"has no attribute ['\"]([A-Za-z_]\w*)['\"]",
-        r"has no exported member ['\"]([A-Za-z_]\w*)['\"]",
-        r"Property ['\"]([A-Za-z_]\w*)['\"] does not exist",
-        r"symbol:\s+(?:class|interface|enum|record|method|variable)\s+([A-Za-z_]\w*)",  # javac
-        r"undefined: ([A-Za-z_]\w*)",  # go
-        r"The (?:type or namespace )?name '([A-Za-z_]\w*)'",  # C#
-    )
-    missing_module_patterns = (
-        r"No module named ['\"]([^'\"\s]+)['\"]",
-        r"Cannot find module ['\"]([^'\"\s]+)['\"]",
-    )
-    symbols = [m.group(1) for pattern in missing_symbol_patterns
+    symbols = [m.group(1) for pattern in MISSING_SYMBOL_PATTERNS
                for m in re.finditer(pattern, logs, re.IGNORECASE)]
-    modules = [m.group(1) for pattern in missing_module_patterns
+    modules = [m.group(1) for pattern in MISSING_MODULE_PATTERNS
                for m in re.finditer(pattern, logs, re.IGNORECASE)]
     sources = [(name, (public_tree / name).read_text(encoding='utf-8', errors='replace'))
                for name in (public_files or []) if public_tree and (public_tree / name).is_file()]
@@ -942,17 +969,31 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         red_status = 'not_run'
         red_result = None
         if tdd_enabled:
-            tests = agent_stage(provider, session, 'tests', public_tree,
-                                {**context, 'specification': spec, 'discovery': discovery,
-                                 'plan': plan, 'test_visibility': 'public',
-                                 'test_policy': {'existing_test_files_editable': bool(
-                                     cfg.get('safety', {}).get('allow_existing_test_modifications', False))}},
-                                write=True)
-            public_patch = artifacts / 'public_tests.patch'
-            public_files = get_patch(public_tree, public_patch, cfg, test_only=True)
-            if set(tests['files_modified']) != set(public_files):
-                raise Blocked('Test engineer declared files do not match public test patch.')
-            setup_environment(public_tree, cfg, artifacts / 'public_setup.json')
+            tests_context = {**context, 'specification': spec, 'discovery': discovery,
+                             'plan': plan, 'test_visibility': 'public',
+                             'test_policy': {'existing_test_files_editable': bool(
+                                 cfg.get('safety', {}).get('allow_existing_test_modifications', False))}}
+            for tests_attempt in (1, 2):
+                tests = agent_stage(provider, session, 'tests', public_tree, tests_context,
+                                    write=True, attempt=tests_attempt)
+                public_patch = artifacts / 'public_tests.patch'
+                public_files = get_patch(public_tree, public_patch, cfg, test_only=True)
+                if set(tests['files_modified']) != set(public_files):
+                    raise Blocked('Test engineer declared files do not match public test patch.')
+                setup_environment(public_tree, cfg, artifacts / 'public_setup.json')
+                static_log = public_tests_static_failure(public_tree, cfg,
+                                                         artifacts / f'public_static_{tests_attempt}.json')
+                if not static_log:
+                    break
+                print(f'[AI Nest] public tests fail static checks (attempt {tests_attempt}/2)', flush=True)
+                if tests_attempt == 2:
+                    raise Blocked('Public tests still fail static checks, which the coder may not fix: '
+                                  + static_log[-1000:])
+                tests_context = {**tests_context, 'feedback': {
+                    'cause': 'public_tests_fail_static_checks', 'static_check_log_tail': static_log,
+                    'guidance': 'Write the tests again so that these static checks pass, for example '
+                                'sorted imports and no unused names. Change only test files.'}}
+                checkout_reset(public_tree, base_commit)
             red_cfg = {'verification': {'commands': tdd['red_commands'], 'require_project_checks': True},
                        'limits': cfg.get('limits', {})}
             red_result = run_checks(public_tree, red_cfg, artifacts / 'public_red.json', 'RED')

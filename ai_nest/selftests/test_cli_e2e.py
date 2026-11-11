@@ -42,6 +42,8 @@ elif '# Role: test-engineer — PUBLIC' in prompt:
     else:
         body = 'import unittest\nfrom calc import add\nclass TestCalc(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1,2),3)\n'
         expected = ['test_add']
+    if scenario == 'tests_lint_stuck' or (scenario == 'tests_lint' and 'public_tests_fail_static_checks' not in prompt):
+        body = 'import unittest\nimport os\n' + body.replace('import unittest\n', '', 1)  # unsorted, like ruff I001
     (base/'tests/test_feature.py').write_text(body)
     files = ['tests/test_feature.py']
     if scenario in ('new_fixture', 'new_nested_fixture', 'coder_nested_helper_edit'):
@@ -183,6 +185,38 @@ class EndToEndTests(unittest.TestCase):
         self.assertFalse((run_dir / 'artifacts/planning.json').exists())
         self.assertNotEqual(self.nest(root, env, 'run', '--from-plan', run_dir.name,
                                       '--allow-host-execution').returncode, 0)
+
+    def lint_project(self, scenario):
+        """Feature project whose static suite rejects unsorted `import` lines in tests, like ruff I001."""
+        root, env = self.feature_project(scenario)
+        lint = ("import pathlib, sys\n"
+                "bad = [p for p in sorted(pathlib.Path('tests').glob('*.py'))\n"
+                "       if (lambda i: i != sorted(i))([l for l in p.read_text().splitlines() if l.startswith('import ')])]\n"
+                "print(*[f'{p}:1:1: I001 Import block is un-sorted or un-formatted' for p in bad], sep='\\n')\n"
+                "sys.exit(1 if bad else 0)\n")
+        manifest = json.loads((root / 'scripts/verify.config.json').read_text())
+        manifest['checks'].insert(0, {'name': 'lint', 'suite': 'static', 'cwd': '.',
+                                      'argv': [sys.executable, '-c', lint]})
+        (root / 'scripts/verify.config.json').write_text(json.dumps(manifest))
+        cmd(root, 'git', 'commit', '-qam', 'add lint')
+        p = self.nest(root, env, 'run', '--session', 'lint', '--allow-host-execution', 'Fix addition')
+        run_dir = next((root / '.ai-nest/runs').iterdir())
+        stages = sorted(f.name.split('.')[0] for f in (run_dir / 'artifacts').glob('*.schema.json'))
+        return p, json.loads((run_dir / 'report.json').read_text()), stages
+
+    def test_public_tests_that_fail_lint_go_back_to_the_test_engineer(self):
+        p, report, stages = self.lint_project('tests_lint')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual((report['status'], report['attempts']), ('verified', 1))
+        self.assertIn('tests_02', stages)
+        self.assertEqual([s for s in stages if s.startswith('implement')], ['implement_01'])
+
+    def test_public_tests_still_failing_lint_stop_before_the_coder(self):
+        p, report, stages = self.lint_project('tests_lint_stuck')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('Public tests still fail static checks', report['error'])
+        self.assertIn('I001', report['error'])
+        self.assertFalse([s for s in stages if s.startswith(('implement', 'repair'))], stages)
 
     def test_approved_plan_is_refused_after_the_code_moved(self):
         root, env = self.feature_project('happy')

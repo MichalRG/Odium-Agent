@@ -393,6 +393,24 @@ class NestTests(unittest.TestCase):
         with self.assertRaisesRegex(nest.Blocked, 'invalid observation'):
             nest.parse_result('explore', result)
 
+    def test_static_failure_of_public_tests_ignores_expected_missing_symbols(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            (tree / 'scripts').mkdir()
+            manifest = tree / 'scripts/verify.config.json'
+            manifest.write_text(json.dumps({'checks': [{'name': 'unit', 'suite': 'unit'}]}))
+            with patch.object(nest, 'run_checks') as run:
+                self.assertEqual(nest.public_tests_static_failure(tree, {}, tree / 'out.json'), '')
+                run.assert_not_called()  # no static suite configured
+            manifest.write_text(json.dumps({'checks': [{'name': 'lint', 'suite': 'static'}]}))
+            def failed(log):
+                return {'passed': False, 'checks': [{'stdout_tail': log, 'stderr_tail': ''}]}
+            with patch.object(nest, 'run_checks', return_value=failed('t.py:1:1: I001 Import block is un-sorted')):
+                self.assertIn('I001', nest.public_tests_static_failure(tree, {}, tree / 'out.json'))
+            with patch.object(nest, 'run_checks', return_value=failed(
+                    "t.spec.ts(1,10): error TS2305: Module '\"./calc\"' has no exported member 'multiply'.")):
+                self.assertEqual(nest.public_tests_static_failure(tree, {}, tree / 'out.json'), '')
+
     def test_extra_observations_keep_the_most_severe_instead_of_blocking(self):
         def obs(severity, n):
             return {'kind': 'fact', 'severity': severity, 'summary': f'{severity}{n}', 'evidence': 'e',

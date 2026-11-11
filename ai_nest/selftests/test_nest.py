@@ -146,6 +146,17 @@ class NestTests(unittest.TestCase):
             (repo / 'new.py').unlink()
             self.assertFalse(progressed(), 'returning to an earlier state is not progress')
 
+    def test_plan_commits_must_list_every_task_exactly_once(self):
+        plan = {'tasks': [{'id': 'T1', 'description': 'a', 'files': []}, {'id': 'T2', 'description': 'b', 'files': []}],
+                'testing_strategy': 'unit', 'risks': [], 'observations': []}
+        for commits in ([{'message': 'A', 'tasks': ['T1']}],
+                        [{'message': 'A', 'tasks': ['T1', 'T2']}, {'message': 'B', 'tasks': ['T2']}],
+                        [{'message': 'A', 'tasks': ['T1', 'T2', 'T3']}]):
+            with self.assertRaisesRegex(nest.Blocked, 'every task exactly once'):
+                nest.parse_result('plan', {**plan, 'commits': commits})
+        ok = nest.parse_result('plan', {**plan, 'commits': [{'message': 'A', 'tasks': ['T2', 'T1']}]})
+        self.assertEqual(ok['commits'][0]['tasks'], ['T2', 'T1'])
+
     def test_no_checks_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = {'verification': {'autodetect': False, 'commands': [], 'require_project_checks': True}}
@@ -320,6 +331,7 @@ class NestTests(unittest.TestCase):
                                 'constraints': [], 'open_questions': [], 'observations': [note]}
                     if stage == 'plan':
                         return {'tasks': [{'id': 't1', 'description': 'fix add', 'files': ['calc.py']}],
+                                'commits': [{'message': 'Fix add', 'tasks': ['t1']}],
                                 'testing_strategy': 'unit tests', 'risks': [], 'observations': [note]}
                     if stage == 'tests':
                         self_ref = cwd / 'tests' / 'test_feature.py'

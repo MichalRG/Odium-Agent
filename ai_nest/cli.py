@@ -32,7 +32,7 @@ NEST_RELEASE = '4.4'
 SCHEMAS = {
     'explore': {'summary': 'string', 'relevant_files': 'list', 'risks': 'list'},
     'specify': {'goal': 'string', 'acceptance_criteria': 'list', 'constraints': 'list', 'open_questions': 'list'},
-    'plan': {'tasks': 'list', 'testing_strategy': 'string', 'risks': 'list'},
+    'plan': {'tasks': 'list', 'testing_strategy': 'string', 'risks': 'list', 'commits': 'list'},
     'tests': {'summary': 'string', 'files_modified': 'list', 'expected_red_tests': 'list',
               'coder_guidance': 'list', 'test_strategy': 'object'},
     'protected_tests': {'summary': 'string', 'files_modified': 'list'},
@@ -531,7 +531,8 @@ def schema_for(stage: str) -> dict:
                         'constraints': list_of(string), 'open_questions': list_of(string)}),
         'plan': obj({'tasks': list_of(obj({'id': string, 'description': string,
                                           'files': list_of(string)})),
-                     'testing_strategy': string, 'risks': list_of(string)}),
+                     'testing_strategy': string, 'risks': list_of(string),
+                     'commits': list_of(obj({'message': string, 'tasks': list_of(string)}))}),
         'tests': obj({'summary': string, 'files_modified': list_of(string),
                       'expected_red_tests': list_of(string), 'coder_guidance': list_of(string),
                       'test_strategy': obj({level: list_of(string) for level in
@@ -573,6 +574,12 @@ def parse_result(stage: str, result: Any) -> dict:
             raise Blocked(f'{stage} returned an unknown observation kind')
         if observation['severity'] not in ('info', 'low', 'medium', 'high', 'critical'):
             raise Blocked(f'{stage} returned an unknown observation severity')
+    if stage == 'plan':
+        planned = [task for commit in result['commits'] if isinstance(commit, dict)
+                   for task in commit.get('tasks', [])]
+        task_ids = [task.get('id') for task in result['tasks'] if isinstance(task, dict)]
+        if sorted(map(str, planned)) != sorted(map(str, task_ids)):
+            raise Blocked('plan returned commits that do not list every task exactly once')
     # Agents list observations in any order; later runs see only the first few per stage.
     rank = ('critical', 'high', 'medium', 'low', 'info')
     result['observations'] = sorted(observations, key=lambda o: rank.index(o['severity']))[:16]
@@ -760,6 +767,14 @@ def needs_security_review(files: list[str], cfg: dict, session: SessionStore | N
 def blocking_findings(review: dict, cfg: dict) -> list[dict]:
     severities = cfg.get('review_policy', {}).get('blocking_severities', ['critical', 'high'])
     return [f for f in review['findings'] if f['severity'].lower() in severities]
+
+
+def findings_to_fix(review: dict, cfg: dict) -> list[dict]:
+    """Nonblocking findings the coder can act on: it may not edit tests or gate files."""
+    severities = cfg.get('review_policy', {}).get('fix_severities', ['medium', 'low'])
+    return [f for f in review['findings'] if f['severity'].lower() in severities
+            and not is_test_file(f['file'].split(':')[0], cfg)
+            and not is_blocked_file(f['file'].split(':')[0], cfg)]
 
 
 def safe_failure_feedback(validation: dict, *, protected: bool = True) -> dict:
@@ -953,6 +968,8 @@ def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dic
             lines += [f'{title}:'] + [f'  - {item}' for item in items]
     lines.append('Tasks:')
     lines += [f'  {t["id"]}: {t["description"]} [{", ".join(t["files"])}]' for t in plan['tasks']]
+    lines.append('Commits:')
+    lines += [f'  {i}. {c["message"]} ({", ".join(c["tasks"])})' for i, c in enumerate(plan['commits'], 1)]
     lines += [f'Testing: {plan["testing_strategy"]}',
               f'Approve: python ai_nest/cli.py run --from-plan {run_id} --provider <provider> --allow-host-execution',
               f'Change:  python ai_nest/cli.py plan --session "{session}" ... "<request + owner feedback>"']
@@ -1036,6 +1053,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 session.record_result('planned', run_root / 'report.json')
                 print_plan(run_id, session.name, discovery, spec, plan)
                 return 0
+        # Plans made before commit planning existed have none; the merge then makes one commit.
+        summary['planned_commits'] = plan.get('commits', [])
         public_patch = None
         public_files: list[str] = []
         red_status = 'not_run'
@@ -1095,11 +1114,32 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         feedback: dict = {}
         # A block before verification resets the tree, which leaves repair nothing to fix.
         code_in_tree = False
+        # The latest verified and approved attempt, kept while the coder fixes its review findings.
+        accepted: dict | None = None
+
+        def finish(result: dict) -> int:
+            summary.update({'status': 'verified', 'completed': now(), 'attempts': result['attempt'],
+                            'code_files': result['code_files'], 'review': result['review'],
+                            'verification': result['verification'],
+                            'note': 'Locally verified only. No remote CI/human review, PR, merge or deployment.'})
+            if result['security_review'] is not None:
+                summary['security_review'] = result['security_review']
+            if bootstrap:
+                summary['created_protected_files'] = sorted(result['created'])
+                print('[AI Nest] Bootstrap created build/test config; review it before committing: '
+                      + ', '.join(sorted(result['created'])), flush=True)
+            write_json(run_root / 'report.json', summary)
+            session.record_result('verified', run_root / 'report.json')
+            print(f'[AI Nest] VERIFIED local gates. Worktree: {code_tree}', flush=True)
+            print(f'[AI Nest] Report: {run_root / "report.json"}', flush=True)
+            return 0
+
         max_attempts = int(cfg.get('limits', {}).get('max_repair_attempts', 2)) + 1
         for attempt in range(1, max_attempts + 1):
             print(f'[AI Nest] implementation attempt {attempt}/{max_attempts}', flush=True)
             stage = 'bootstrap' if bootstrap else 'repair' if code_in_tree else 'implement'
             stopped = ''
+            security = None
             try:
                 try:
                     agent_stage(provider, session, stage, code_tree,
@@ -1128,7 +1168,9 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 feedback = {'cause': 'worker_policy_or_execution_error',
                             'guidance': '; '.join(filter(None, (stopped, str(ex))))[:1000]}
                 checkout_reset(code_tree, base_commit, public_patch)
-                code_in_tree = False
+                if accepted is not None:
+                    apply_patch(code_tree, accepted['code_patch'])  # back to the approved code
+                code_in_tree = accepted is not None
                 print(f'[AI Nest] attempt {attempt} blocked before verification: {ex}', flush=True)
                 continue
             code_in_tree = True
@@ -1223,28 +1265,35 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                         continue
                     if not sec['approved'] and not sec['findings']:
                         raise Blocked('Security reviewer withheld approval without specific findings.')
-                    summary['security_review'] = sec
+                    security = sec
                 if git(code_tree, 'rev-parse', 'HEAD') != base_commit:
                     raise Blocked('Final worktree HEAD differs from trusted base commit')
-                summary.update({'status': 'verified', 'completed': now(), 'attempts': attempt,
-                                'code_files': code_files, 'review': review,
-                                'verification': str(verification_file),
-                                'note': 'Locally verified only. No remote CI/human review, PR, merge or deployment.'})
-                if bootstrap:
-                    summary['created_protected_files'] = sorted(created)
-                    print('[AI Nest] Bootstrap created build/test config; review it before committing: '
-                          + ', '.join(sorted(created)), flush=True)
-                write_json(run_root / 'report.json', summary)
-                session.record_result('verified', run_root / 'report.json')
-                print(f'[AI Nest] VERIFIED local gates. Worktree: {code_tree}', flush=True)
-                print(f'[AI Nest] Report: {run_root / "report.json"}', flush=True)
-                return 0
+                accepted = {'attempt': attempt, 'code_files': code_files, 'review': review,
+                            'verification': str(verification_file), 'code_patch': code_patch,
+                            'security_review': security, 'created': created}
+                to_fix = findings_to_fix(review, cfg)
+                if to_fix and attempt < max_attempts:
+                    feedback = {'cause': 'review_findings_to_fix', 'findings': to_fix,
+                                'guidance': 'The code passed verification and review. Fix these findings in '
+                                            'production code without changing the specified behaviour. If a '
+                                            'finding is wrong, leave that code and explain why in an observation.'}
+                    print(f'[AI Nest] attempt {attempt} verified and approved; '
+                          f'the coder now fixes {len(to_fix)} review findings', flush=True)
+                    continue
+                return finish(accepted)
             except Blocked as ex:
                 # Infrastructural errors are not evidence that a code change is wrong.
                 feedback = {'cause': 'verification_or_review_blocker', 'error': str(ex)[:1000]}
                 print(f'[AI Nest] attempt {attempt} blocked: {ex}', flush=True)
                 if 'withheld approval' in str(ex) or 'Diff exceeds' in str(ex):
                     break
+        if accepted is not None:
+            print(f'[AI Nest] fixing the review findings did not pass the gates again; '
+                  f'keeping approved attempt {accepted["attempt"]}', flush=True)
+            checkout_reset(code_tree, base_commit, public_patch)
+            apply_patch(code_tree, accepted['code_patch'])
+            summary['review_fix_failed'] = str(feedback)[:1000]
+            return finish(accepted)
         raise Blocked(f'Repair budget exhausted; latest evidence: {str(feedback)[:1000]}')
     except Exception as ex:
         summary.update({'status': 'blocked', 'completed': now(), 'error': str(ex)})

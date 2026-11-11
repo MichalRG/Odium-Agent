@@ -31,7 +31,8 @@ elif '# Role: specification writer' in prompt:
     result = {'goal':'correct add','acceptance_criteria':['add(1,2)==3'], 'constraints':[],
               'open_questions':['Should add accept floats?'] if scenario == 'questions' else []}
 elif '# Role: planner' in prompt:
-    result = {'tasks':[{'id':'T1','description':'correct add','files':['calcx.py' if scenario == 'red_new_module' else 'calc.py']}], 'testing_strategy':'unit','risks':[]}
+    result = {'tasks':[{'id':'T1','description':'correct add','files':['calcx.py' if scenario == 'red_new_module' else 'calc.py']}], 'testing_strategy':'unit','risks':[],
+              'commits':[{'message':'Correct add','tasks':['T1']}]}
 elif '# Role: test-engineer — PUBLIC' in prompt:
     if scenario == 'red_invalid':
         body = 'import totally_missing_dependency_123\n'
@@ -101,7 +102,14 @@ elif '# Role: coder repair' in prompt:
     assert (base/'tests/test_feature.py').read_text().find('assertEqual')!=-1
     if scenario == 'coder_timeout':
         assert 'stopped at its time limit' in prompt and 'unfinished' in (base/'calc.py').read_text()
-    (base/'calc.py').write_text('def add(a,b):\n    return a+b\n')
+    if scenario.startswith('review_'):
+        # Fixing the findings starts from the approved code; the test-file finding is not sent.
+        assert 'add repeats logic' in prompt and 'weak test' not in prompt
+        assert 'a+b' in (base/'calc.py').read_text()
+    if scenario == 'review_fix_breaks':
+        (base/'calc.py').write_text('def add(a,b):\n    return a-b\n')
+    else:
+        (base/'calc.py').write_text('def add(a, b):\n    return a + b\n')
     result = {'summary':'repaired', 'files_modified':['calc.py']}
 elif '# Role: bootstrapper' in prompt:
     if scenario == 'bootstrap_gate_edit' and 'worker_policy_or_execution_error' not in prompt:
@@ -116,6 +124,11 @@ elif '# Role: bootstrapper' in prompt:
     result = {'summary':'scaffolded', 'files_modified':sorted(files)}
 elif '# Role: code-reviewer' in prompt or '# Role: security-reviewer' in prompt:
     result = {'approved':True,'findings':[],'summary':'approved'}
+    earlier_reviews = Path(args[args.index('--output-last-message') + 1]).parent.glob('review_*.answer.json')
+    if '# Role: code-reviewer' in prompt and scenario.startswith('review_') and not list(earlier_reviews):
+        result['findings'] = [
+            {'severity':'medium','file':'calc.py','problem':'add repeats logic','evidence':'calc.py:2'},
+            {'severity':'medium','file':'tests/test_feature.py','problem':'weak test','evidence':'test_feature.py:4'}]
 else:
     raise SystemExit('Unrecognized stage in fake provider')
 result['observations'] = notes
@@ -272,6 +285,31 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(report['status'], 'blocked')
         self.assertRegex(report['error'], r'Diff exceeds the review limit: \d+ characters, limit 100')
         self.assertFalse(list((run_dir / 'artifacts').glob('review_*')), 'no reviewer may see a cut diff')
+
+    def test_review_findings_go_back_to_the_coder_after_approval(self):
+        root, env = self.feature_project('review_findings')
+        p = self.nest(root, env, 'run', '--provider', 'codex', '--session', 'calc',
+                      '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        run_dir = next((root / '.ai-nest/runs').iterdir())
+        report = json.loads((run_dir / 'report.json').read_text())
+        self.assertEqual((report['status'], report['attempts'], report['review']['findings']), ('verified', 2, []))
+        self.assertEqual(report['planned_commits'], [{'message': 'Correct add', 'tasks': ['T1']}])
+        self.assertIn('a + b', (Path(report['worktree']) / 'calc.py').read_text())
+        stages = sorted(f.name.split('.')[0] for f in (run_dir / 'artifacts').glob('*.schema.json'))
+        self.assertEqual([s for s in stages if s.startswith(('implement', 'repair', 'review'))],
+                         ['implement_01', 'repair_01', 'review_01', 'review_02'])
+
+    def test_failed_fix_of_review_findings_keeps_the_approved_attempt(self):
+        root, env = self.feature_project('review_fix_breaks')
+        p = self.nest(root, env, 'run', '--provider', 'codex', '--session', 'calc',
+                      '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        report = json.loads(next((root / '.ai-nest/runs').glob('*/report.json')).read_text())
+        self.assertEqual((report['status'], report['attempts']), ('verified', 1))
+        self.assertIn('verification_failed', report['review_fix_failed'])
+        self.assertEqual(len(report['review']['findings']), 2, 'the unfixed findings stay in the report')
+        self.assertIn('a+b', (Path(report['worktree']) / 'calc.py').read_text())
 
     def test_approved_plan_is_refused_after_the_code_moved(self):
         root, env = self.feature_project('happy')

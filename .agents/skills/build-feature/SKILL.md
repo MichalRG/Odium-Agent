@@ -31,7 +31,7 @@ The user invokes this skill once. Carry the whole feature through this conversat
    ```
    The nest scouts the repository and its documents, writes the specification and the plan, and stops. It changes no code. Act on the exit code:
    - **2: questions.** **Checkpoint:** show the questions exactly as printed and wait for the answers. Then run `plan` again with the same session. The request is the original text, followed by `Owner answers:` and each question with its answer.
-   - **0: plan ready.** **Checkpoint:** show the goal, acceptance criteria, constraints, risks and tasks from the output (the full data is in `.ai-nest/runs/<run-id>/artifacts/planning.json`). Ask the user to approve it, change it or stop.
+   - **0: plan ready.** **Checkpoint:** show the goal, acceptance criteria, constraints, risks, tasks and planned commits from the output (the full data is in `.ai-nest/runs/<run-id>/artifacts/planning.json`). Ask the user to approve it, change it or stop.
      - For a change, run `plan` again with the same session. The request is the previous request, followed by `Owner feedback on the previous plan:` and the feedback. Then repeat this checkpoint.
      - When the plan has more than about 5 tasks, touches more than about 10 files, or joins parts that can work on their own (for example a data model, a CLI and platform adapters), recommend building it in slices (see Slices) and propose the slices in order.
    - **1: blocked.** Report the error and stop.
@@ -40,8 +40,12 @@ The user invokes this skill once. Carry the whole feature through this conversat
    python ai_nest/cli.py run --from-plan <plan-run-id> --provider <provider> --allow-host-execution
    ```
    The nest writes failing public tests, implements, verifies in a fresh checkout, reviews and repairs within its budget. This step has no checkpoint. If the command says that HEAD moved, go back to step 2 and get approval for the new plan.
-4. **Result.** **Checkpoint:** report as described in Report. When the run is verified, show `git -C <worktree> diff --stat HEAD` and offer the full diff. When it is blocked, give the cause and offer to plan again in the same session with the cause as owner feedback.
-5. **Merge.** Do this only when the user tells you to. In the worktree run `git add -A` and `git commit -m "<one-line summary>"`. Then, from the repository root, run `git merge --ff-only <branch>`, `git worktree remove <worktree>` and `git branch -d <branch>`. Never push.
+4. **Result.** **Checkpoint:** report as described in Report. When the run is verified, show `git -C <worktree> diff --stat HEAD`, offer the full diff, and show the commits you will make at the merge:
+   - Take the `planned_commits` from `report.json`, in their order. Give each changed file (`git -C <worktree> status --porcelain`) to the commit whose tasks name it. A test file goes with the commit whose behaviour it covers. A file that several commits need goes in the first of them. A file that no task names goes where its content belongs.
+   - For each commit, show its subject, a one-line body (what it adds and why) and its files.
+   - When `planned_commits` is empty (a plan made before commit planning), propose one commit.
+   When the run is blocked, give the cause and offer to plan again in the same session with the cause as owner feedback.
+5. **Merge.** Do this only when the user tells you to. Make the commits shown at the Result checkpoint, with the user's changes, in order: for each one, run `git -C <worktree> add -- <files>` and `git -C <worktree> commit -m "<subject>" -m "<body>"`. Check that `git -C <worktree> status --porcelain` is empty at the end. Then, from the repository root, run `git merge --ff-only <branch>`, `git worktree remove <worktree>` and `git branch -d <branch>`. Never push. The nest verified only the final state, not each commit on its own.
 
 **Slices.** A large request is built as a sequence of slices. Each slice is one full cycle of steps 2 to 5: its own plan, approval, build, result and merge. Use the same session for all slices, so that later slices see the handoffs of earlier ones. For each slice, the request is the original request, followed by `Build only this slice:` and the slice description, and then by `Already merged:` and the earlier slices. Plan a slice only after the previous slice is merged: an approved plan is pinned to the HEAD it was planned on.
 
@@ -60,7 +64,7 @@ Set the actual provider. Do not enable host execution without authorization.
 3. Public test engineer writes tests; orchestrator runs RED commands and checks expected test names. A separate protected test stage runs only when configured.
 4. Coder receives planner output and public tests/guidance, never hidden test source or raw logs. Coder cannot change any tests, gate scripts or CI configuration.
 5. Fresh verification combines all patches and runs `scripts/verify.sh`. A separate reviewer checkout repeats verification using public tests only.
-6. Reviewer emits concrete findings. High/critical defects block by default; minor findings are advisory unless policy changes.
+6. Reviewer emits concrete findings, including design quality against the project's standards documents, or the codebase's own patterns when none exist. High/critical findings go to repair. When the code is verified and approved but has medium/low findings in production files, the coder fixes them in the next attempt, which is verified and reviewed again; if that fails, the approved attempt is the result. High/critical defects block by default; minor findings are advisory unless policy changes.
 7. Orchestrator routes optional security review using final code paths and relevant history. If checks fail it runs a bounded repair loop.
 8. On verified: leave local worktree and report, no automatic PR, push or merge. Failed runs preserve session evidence and remove transient worktrees by default.
 

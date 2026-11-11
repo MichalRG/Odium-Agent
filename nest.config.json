@@ -202,6 +202,10 @@
       "critical",
       "high"
     ],
+    "fix_severities": [
+      "medium",
+      "low"
+    ],
     "skip_recheck_without_protected_tests": true
   },
   "routing": {

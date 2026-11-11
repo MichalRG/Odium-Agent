@@ -75,9 +75,15 @@ For Python, also install declared pinned dependencies (e.g. an appropriate `pip 
     "explore": {"model": "gpt-6-luna", "effort": "high"},
     "plan": {"model": "gpt-6-astra", "effort": "high"}
   },
-  "claude": {"default": {"model": "sonnet"}, "plan": {"model": "opus"}}
+  "claude": {
+    "default": {"model": "claude-sonnet-5-5", "effort": "medium"},
+    "plan": {"model": "claude-opus-5-5", "effort": "high"},
+    "security_review": {"model": "claude-fable-5-2", "effort": "high"}
+  }
 }
 ```
+
+Full model IDs keep runs reproducible; Claude aliases such as `opus` or `fable` follow the newest version instead.
 
 Stages: `explore`, `specify`, `plan`, `tests`, `protected_tests`, `implement`, `repair`, `bootstrap`, `review`, `security_review`. Upgrading adds the release defaults for missing entries and keeps yours. The chat that runs `$build-feature` uses your own Codex or Claude settings, not this section.
 

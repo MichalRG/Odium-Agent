@@ -1179,8 +1179,12 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 public_diff = call(['git', 'diff', '--binary', 'HEAD', '--', '.',
                                     *[f':(exclude,glob)**/{name}' for name in LOCKFILES]], review_tree).stdout
                 omitted = [f for f in code_files if Path(f).name in LOCKFILES]
-                if len(public_diff) > 120000:
-                    raise Blocked('Diff exceeds complete review budget; split the feature into smaller tasks.')
+                # The reviewer gets the whole diff inline; a truncated diff would pass unreviewed code.
+                review_limit = int(cfg.get('limits', {}).get('review_diff_max_chars', 400000))
+                if len(public_diff) > review_limit:
+                    raise Blocked(f'Diff exceeds the review limit: {len(public_diff)} characters, limit {review_limit} '
+                                  '(limits.review_diff_max_chars). The diff is never truncated; split the feature '
+                                  'into smaller slices or raise the limit.')
                 review = agent_stage(provider, session, 'review', review_tree,
                                      {'request': request, 'specification': spec, 'plan': plan,
                                       'diff': public_diff, 'lockfiles_omitted_from_diff': omitted,

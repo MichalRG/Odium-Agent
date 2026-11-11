@@ -258,6 +258,21 @@ class EndToEndTests(unittest.TestCase):
         stages = sorted(f.name.split('.')[0] for f in (run_dir / 'artifacts').glob('*.schema.json'))
         self.assertEqual([s for s in stages if s.startswith(('implement', 'repair'))], ['implement_01', 'repair_01'])
 
+    def test_diff_over_the_configured_review_limit_blocks_instead_of_truncating(self):
+        root, env = self.feature_project('happy')
+        cfg = json.loads((root / 'nest.config.json').read_text())
+        cfg['limits']['review_diff_max_chars'] = 100
+        (root / 'nest.config.json').write_text(json.dumps(cfg))
+        self.assertEqual(cmd(root, 'git', 'commit', '-qam', 'tiny review limit').returncode, 0)
+        p = self.nest(root, env, 'run', '--provider', 'codex', '--session', 'calc',
+                      '--allow-host-execution', 'Fix addition')
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
+        run_dir = next((root / '.ai-nest/runs').iterdir())
+        report = json.loads((run_dir / 'report.json').read_text())
+        self.assertEqual(report['status'], 'blocked')
+        self.assertRegex(report['error'], r'Diff exceeds the review limit: \d+ characters, limit 100')
+        self.assertFalse(list((run_dir / 'artifacts').glob('review_*')), 'no reviewer may see a cut diff')
+
     def test_approved_plan_is_refused_after_the_code_moved(self):
         root, env = self.feature_project('happy')
         self.assertEqual(self.nest(root, env, 'plan', '--allow-host-execution', 'Fix addition').returncode, 0)

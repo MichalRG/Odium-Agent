@@ -149,6 +149,7 @@
     "max_repair_attempts": 2,
     "agent_timeout_seconds": 1800,
     "agent_max_seconds": 14400,
+    "review_diff_max_chars": 400000,
     "check_timeout_seconds": 4830
   },
   "models": {

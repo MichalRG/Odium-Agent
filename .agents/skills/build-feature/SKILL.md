@@ -63,7 +63,7 @@ Set the actual provider. Do not enable host execution without authorization.
 2. Explorer → specification → planner, with orchestrator-owned handoffs. `plan` stops here; `run --from-plan` starts after here with the approved plan and refuses it when HEAD moved.
 3. Public test engineer writes tests; orchestrator runs RED commands and checks expected test names. A separate protected test stage runs only when configured.
 4. Coder receives planner output and public tests/guidance, never hidden test source or raw logs. Coder cannot change any tests, gate scripts or CI configuration.
-5. Fresh verification combines all patches and runs `scripts/verify.sh`. A separate reviewer checkout repeats verification using public tests only.
+5. Fresh verification combines all patches and runs `scripts/verify.sh`. When protected tests are enabled, a separate reviewer checkout repeats verification with public tests only.
 6. Reviewer emits concrete findings, including design quality against the project's standards documents, or the codebase's own patterns when none exist. High/critical findings go to repair. When the code is verified and approved but has medium/low findings in production files, the coder fixes them in the next attempt, which is verified and reviewed again; if that fails, the approved attempt is the result. High/critical defects block by default; minor findings are advisory unless policy changes.
 7. Orchestrator routes optional security review using final code paths and relevant history. If checks fail it runs a bounded repair loop.
 8. On verified: leave local worktree and report, no automatic PR, push or merge. Failed runs preserve session evidence and remove transient worktrees by default.

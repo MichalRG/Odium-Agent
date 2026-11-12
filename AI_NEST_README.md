@@ -196,76 +196,31 @@ python ai_nest/cli.py sessions show projects-pagination
 
 ## Controls and limits
 
-- Agent writes to `AGENTS.md`, `.claude/`, `.agents/`, `.github/`, `ai_nest/`, `nest.config.json`, verification scripts, package scripts (`package.json`), pytest/Angular settings and other protected files block the run.
-- Risk routing comes **only** from the orchestrator, not agent prompts. Full dynamic selection for every role is not implemented; the core stages are still fixed. Security review is conditional.
-- A configured check failure, missing check manifest, missing binaries or runtime timeout never becomes a passing result. Every agent stage pins the expected Git HEAD: unauthorized commits/rebases trigger a failed attempt. Invalid provider JSON is reported as blocked after persisting available output logs. Subprocess timeouts kill process groups on POSIX.
-- Verification configuration changes, new dependencies and CI policy changes require separate trusted maintenance, not autonomous coder edits. The GitHub Actions template should be customized with install/service steps, and a PR that changes protected files will require a separately reviewed exception procedure.
-- Claude read-only stages have Bash for authorized investigation but are checked for source mutations. The CLI adapters use stdin for prompts to avoid OS argument-length failures.
-- Protected evaluation is **not fully secure on a shared host**. Do not deploy this to privileged repositories without external sandboxing, separate identities, enforced network policy and explicit CI protections.
-- No live Codex or Claude CLI execution has been verified by the included mock-based tests. Check your installed CLI version and run a controlled provider smoke test before relying on it.
+- **Protected files.** An agent change to `AGENTS.md`, `.claude/`, `.agents/`, `.github/`, `ai_nest/`, `nest.config.json`, the verification scripts, `package.json`, lockfiles, test or lint settings, or any other path in `safety.blocked_paths` and `safety.protected_basenames` blocks the attempt. `safety.test_path_globs` decides what counts as a test. Changes to checks, dependencies or CI are maintenance by a person, never an agent edit; a PR that changes protected files needs its own reviewed exception.
+- **Nothing fails open.** A failed check, a missing manifest or binary, or a timeout never becomes a pass. Timeouts kill the whole process group on POSIX. Invalid provider JSON blocks the stage after its output logs are saved.
+- **Pinned base.** Every stage pins Git HEAD: an agent commit or rebase fails the attempt. Every repair resets the worktree to the original `base_commit`, so agent commits never reach the result. An attempt blocked before verification (policy violation, moved HEAD, no changes) is reset with nothing kept, and the next attempt runs `implement` again with the reason as feedback; `repair` runs only on code that reached verification.
+- **Fixed stages.** Risk routing comes only from the orchestrator, never from agent prompts. The core stages are fixed; only the security review is conditional.
+- **RED policy.** `tdd.already_green_policy` defaults to `block`; `allow` is explicit. A test that fails on a missing *new* symbol is valid RED. A missing new Python or TypeScript module counts only when it is in the planner's `tasks[].files` and referenced by the generated tests. Unrelated missing dependencies and broken test setups block. A test may assert on errors such as `SyntaxError` or `ENOENT` itself: those words block RED only when the expected tests never ran.
+- **Fixtures.** The test engineer may add a **new** `tests/conftest.py`; editing an existing fixture is blocked. CI `verify --base` blocks new fixtures as well, because it cannot tell which agent added them, unless the trusted base policy sets `safety.allow_new_test_fixtures_in_ci=true`. Review such fixtures by hand.
+- **Failure feedback.** With `tdd.protected_tests=false` (the default) the repair agent gets sanitized tails of the public failure logs. With protected tests on, all raw verification output is withheld from the coder.
+- **Agent time.** `limits.agent_timeout_seconds` (default 1800) is a window, not a hard stop, for stages that write files (tests, implement, repair). At the end of each window the orchestrator checks the worktree: if the files reached a state it has not seen before, the agent gets another window, up to `limits.agent_max_seconds` (default 14400) in total. If nothing changed in the last window, or the files went back to an earlier state, the agent is stopped. A coder stopped this way keeps its unfinished code: it goes through the same policy checks and verification, and `repair` continues it. Read-only stages stop after one window.
+- **Review size.** `limits.review_diff_max_chars` (default 400000, about 100k tokens) caps the diff of code and public tests that the reviewers get inline. Lockfiles are left out. The diff is never truncated: a larger diff blocks the run after verification, so split the feature into slices or raise the limit within the review models' context.
+- **Check time.** `limits.check_timeout_seconds` applies per **orchestrator check**, not to each check inside `scripts/verify.py`, so it must cover the sum of the manifest's check budgets: eight checks of 600 seconds need at least 4830. The shipped CI job allows 100 minutes; lower the check budgets and the CI limit to fit your stack. On upgrade the installer raises the outer budget when the manifest needs it, but it cannot choose your tests.
+- **Cleanup.** `cleanup.blocked_worktrees` (default true) removes failed worktrees and their temporary branches after logs, patches and session reports are written. Verified worktrees stay for inspection.
+- **Project checks are yours.** The package ships an example manifest that uses `backend/` and `frontend/`, not working checks. Configure `scripts/verify.config.json`, `tdd.red_commands` and any `environment.setup_commands` before running features; the runtime fails closed without a real manifest, and `verify.py` rejects unknown keys in a check. Customize the CI template's install and service steps for your repository.
+- **Not a sandbox.** Git worktrees and CLI flags are not OS isolation: agents can reach the host filesystem and MCP tools. Hidden tests are not confidential while workers share a filesystem, so enable `tdd.protected_tests` only in separately isolated workers. Codex stages run in its `--sandbox`. The read-only stages of Claude and Copilot keep a shell for investigation, and the orchestrator checks them for source changes afterwards. Claude runs with `--setting-sources project --strict-mcp-config` and Copilot with `--no-custom-instructions --disable-builtin-mcps`; neither isolates user or managed plugins, tools or MCP servers. Do not point this at privileged repositories without external sandboxing, separate identities and network policy. Prompts go through stdin, so long contexts never hit argument-length limits.
+- **Providers.** The self-tests use stand-in CLIs, not live models. Check your installed CLI version and run a controlled smoke test before you rely on a provider.
 
-## Regression tests
-
-From the repository root (the suite lives in `ai_nest/selftests/`):
-
-```bash
-python -m unittest discover -s ai_nest/selftests -p 'test_*.py' -v
-```
-
-Includes mocked full flow with public RED/hidden-test separation, Git/worktree install tests, provider argument tests, policy cases and verify-runner tests. No real model correctness is claimed.
-
-## v4.4 gates and repair diagnostics
-
-- Configure `safety.test_path_globs` and `safety.protected_basenames` in the committed policy. Verification files such as `pyproject.toml`, `package.json`, lockfiles, pytest config and `.github` must not be writable by a coding agent.
-- `tdd.already_green_policy` defaults to `block`; `allow` is explicit. Generated tests that cannot collect due to a missing *new* symbol can form valid RED evidence, but unrelated missing dependencies or test setup errors block the run.
-- `cleanup.blocked_worktrees` defaults to true. Failed worktrees and temporary branches are removed after logs, patches and persistent session reports are written. Verified worktrees remain for inspection.
-- With `tdd.protected_tests=false`, sanitized public failure tails are handed to the repair agent. With protected tests enabled, all raw verification output is withheld from coder context. Protected tests are **not confidential** if all workers share unrestricted host filesystem access.
-- On Claude, the CLI uses `--setting-sources project --strict-mcp-config`. It narrows settings sources but does not guarantee user/managed plugin or tool isolation; use a disposable environment and audit project settings.
-- `limits.agent_timeout_seconds` (default 1800) is a window, not a hard stop, for stages that write files (tests, implement, repair). At the end of each window the orchestrator checks the worktree: if the files reached a state it has not seen before, the agent gets another window, up to `limits.agent_max_seconds` (default 14400) in total. If nothing changed in the last window, or the files went back to an earlier state, the agent is stopped. A coder stopped this way keeps its unfinished code: it goes through the same policy checks and verification, and `repair` continues it. Read-only stages stop after one window.
-- `limits.review_diff_max_chars` (default 400000, about 100k tokens) caps the diff of code and public tests that the reviewers get inline. Lockfiles are left out. The diff is never truncated: a larger diff blocks the run after verification, so split the feature into slices or raise the limit within the review models' context.
-- `limits.check_timeout_seconds` applies per **orchestrator check**, not to each check inside `scripts/verify.py`. Set the outer timeout larger than the total runtime of configured checks and their individual budgets.
-- This package ships an example verification manifest, **not working project checks**. Configure `scripts/verify.config.json`, `tdd.red_commands`, and any `environment.setup_commands` for your stack before executing features. CI runs configured setup commands and has optional requirements/npm lockfile setup; customize service dependencies and multi-workspace installations for your repository.
-
-## Run all bundled tests
-
-```bash
-python -m unittest discover -s ai_nest/selftests -p 'test_*.py' -v
-```
-
-The tests use a fake CLI adapter and actual temporary Git repositories; they do not validate live model behavior.
-
-## v4.4 integrity and RED policy
-
-- Every repair resets the worktree to the **original pinned `base_commit`**, not mutable `HEAD`; commits made by agents cannot survive into the result.
-- An attempt blocked before verification (policy violation, moved HEAD, no changes) is reset with nothing kept, so the next attempt runs `implement` again with the block reason as feedback. `repair` runs only on code that reached verification.
-- `tdd.protected_tests` defaults to **false**. A shared host filesystem does not keep hidden tests secret. Only enable this in separately isolated workers.
-- Missing new Python/TypeScript modules are accepted as TDD RED only when the module is present in planner `tasks[].files` and referenced by generated public tests. Missing unrelated dependencies block.
-- Test engineers may add a **new** `tests/conftest.py`; editing existing fixtures remains prohibited. Such new fixture files are permitted only when validated as test-agent additions in the local workflow; CI `verify --base` blocks them by default because it cannot verify the test-agent origin. A project may explicitly opt into added-only fixtures with `safety.allow_new_test_fixtures_in_ci=true` in a trusted base-commit policy; edits to existing fixtures remain blocked. Require human review for such new fixtures.
-- `scripts/verify.config.json.example` is a template, **not** a working project configuration. Configure actual paths, packages, dependencies, commands and budgets. The runtime fails closed without a real manifest.
-- Supported v1/v2 `nest.config.json` files are migrated and backed up during `--update-code`, without replacing project-specific test commands. Review any `protected_tests: true` setting manually.
-- Local Git worktrees and CLI flags are not OS isolation. Agents may access host filesystem/MCP tools unless separately sandboxed.
-
-
-## Verify the installed runtime itself
-
-The distribution ZIP and project installation contain `install.py` and the regression suite at `ai_nest/selftests/`. Application `tests/` is never used as the self-test source. In a project, these tests are kept under `ai_nest/selftests/` rather than merged with application tests. Run:
+## Self-tests
 
 ```bash
 python -m unittest discover -s ai_nest/selftests -p 'test_*.py' -q
 ```
 
-The installation manifest must be committed once so fresh clones and CI can pass the installation check. If the runtime is upgraded, run the installer and commit its updated manifest and files.
+The suite lives in `ai_nest/selftests/`, in this repository and in every installed project; the installer never takes a project's own `tests/` for it. It runs the real orchestrator against stand-in provider CLIs and real temporary Git repositories: the full flow with public RED and hidden-test separation, install and upgrade, provider arguments, policies and the verify runner. It does not test live model behaviour. In this repository, `bash scripts/verify.sh` runs it.
 
-To check the installed files and configuration, run `python ai_nest/cli.py doctor --provider codex`. It checks a generated tracked `ai_nest/installation.json` file and reports drift in core runtime files and obsolete Claude instructions. The manifest is local diagnostic metadata; agents with host access can tamper with it, so it is not a security guarantee.
+## Upgrades and distribution
 
-**Never assume the project-specific `scripts/verify.config.json` is automatically configured.** The example uses `backend/` and `frontend/` directories that may not exist. Replace it with actual project commands. If eight checks have 600-second budgets, your outer timeout must be at least 4830 seconds or the individual budgets must be reduced. The shipped CI job allows 100 minutes, but you should lower check budgets and tune the CI limit for your actual stack. The installer can adjust an existing manifest's outer budget on upgrade but cannot choose your project's tests.
-
-The installer updates its own AI Nest CI workflow on `--update-code` (backing up the previous workflow first); merge any project-specific CI changes after upgrading. It never deletes unrelated project verification workflows automatically. During upgrades the installer preserves unrelated project files. It only removes the old duplicate `verify.yml` when it can identify it as AI Nest-owned; it reports uncertain `examples/` directories and `.claude/settings.json` hooks for manual review.
-
-## v4.4 distribution fixes
-
-- `ai_nest/installation.json` is tracked, so new clones do not require rerunning the installer to pass integrity diagnostics. Its hashes are informational drift checks, not security enforcement.
-- The installer selects `ai_nest/selftests/` only; it cannot mistake a project `tests/` directory for AI Nest tests.
-- The AI Nest-owned workflow is upgraded with a backup. CI now has a 100-minute ceiling, but project verification commands and their budgets must be configured explicitly.
-- A nested extracted distribution in a project repository is reported by `doctor` to avoid accidental duplicate commits. Move the extracted release outside before staging.
-- Existing application `tests/test_verify_runner.py`, duplicate CI workflows, and custom settings/hooks are not blindly removed; inspect and remove confirmed legacy artifacts.
+- `ai_nest/installation.json` is tracked. Commit it once, so fresh clones and CI pass the installation check, and commit the updated manifest after every upgrade. `doctor` uses its hashes to report drift in core files and obsolete Claude instructions. Agents with host access can change it, so it is a diagnostic, not a security guarantee.
+- `--update-code` replaces the AI Nest CI workflow (from `ai_nest/templates/ai-nest-verify.yml`) after backing up the old one; merge your own CI changes back after upgrading. It never deletes unrelated workflows: an old duplicate `verify.yml` goes only when it is clearly AI Nest's, and `examples/` folders and `.claude/settings.json` hooks are reported for manual review instead.
+- `doctor` reports a release archive extracted inside the repository (`ai-nest-complete-v*/`); move it out before staging.

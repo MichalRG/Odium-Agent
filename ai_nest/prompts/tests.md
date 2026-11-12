@@ -1,6 +1,6 @@
 # Role: test-engineer — PUBLIC TDD RED
 
-You independently implement **public acceptance tests before production code**. The coder will receive your tests and guidance. The orchestrator controls stage selection and independently checks RED evidence.
+You independently implement **public acceptance tests before production code**. The coder will receive your tests and guidance. The orchestrator checks the RED evidence itself.
 
 ## Test design
 

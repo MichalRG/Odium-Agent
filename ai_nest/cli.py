@@ -14,10 +14,10 @@ import fnmatch
 import re
 from functools import lru_cache
 import signal
-import tempfile
 import json
 import os
 from pathlib import Path
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -71,6 +71,10 @@ class Blocked(RuntimeError):
 
 class TimedOut(Blocked):
     """A command ran past its time limit and was killed."""
+
+
+class Unrepairable(Blocked):
+    """A block that another coding attempt cannot fix."""
 
 
 def now() -> str:
@@ -212,7 +216,7 @@ def detect_checks(worktree: Path) -> list[dict]:
         python_tests = python_tests or '[tool.pytest' in pyproj
     for path in ('tests', 'test'):
         folder = worktree / path
-        if folder.is_dir() and any(p.name != 'test_nest.py' for p in folder.glob('test_*.py')):
+        if folder.is_dir() and any(folder.glob('test_*.py')):
             python_tests = True
     if python_tests:
         checks.append({'name': 'pytest', 'argv': [sys.executable, '-m', 'pytest', '-q'], 'cwd': '.'})
@@ -860,9 +864,6 @@ def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | 
                         public_tree: Path | None = None, public_files: list[str] | None = None,
                         planned_files: list[str] | None = None) -> str:
     """Accept failing assertions or missing *planned* symbols/modules, not broken environments."""
-    import re
-    import posixpath
-
     cfg = cfg or {}
     tdd = cfg.get('tdd', {})
     checks = result.get('checks', [])
@@ -1212,14 +1213,13 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 apply_patch(review_tree, code_patch)
                 # A second check in the review checkout catches broken workspaces
                 # without exposing hidden tests to any reviewer or coder.
-                # Include untracked public tests in both diffs using intent-to-add.
-                changed_files(verify_tree)
+                # Include untracked public tests in the diffs using intent-to-add.
                 changed_files(review_tree)
-                verify_diff = git(verify_tree, 'diff', '--binary', 'HEAD')
-                review_diff = git(review_tree, 'diff', '--binary', 'HEAD')
                 # When hidden tests exist, verification has extra files, so no equivalence claim.
-                if protected_patch is None and hashlib.sha256(verify_diff.encode()).digest() != hashlib.sha256(review_diff.encode()).digest():
-                    raise Blocked('Review checkout differs from verified patch.')
+                if protected_patch is None:
+                    changed_files(verify_tree)
+                    if git(verify_tree, 'diff', '--binary', 'HEAD') != git(review_tree, 'diff', '--binary', 'HEAD'):
+                        raise Blocked('Review checkout differs from verified patch.')
                 skip_recheck = (protected_patch is None and
                                 cfg.get('review_policy', {}).get('skip_recheck_without_protected_tests', True))
                 if skip_recheck:
@@ -1240,7 +1240,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 # The reviewer gets the whole diff inline; a truncated diff would pass unreviewed code.
                 review_limit = int(cfg.get('limits', {}).get('review_diff_max_chars', 400000))
                 if len(public_diff) > review_limit:
-                    raise Blocked(f'Diff exceeds the review limit: {len(public_diff)} characters, limit {review_limit} '
+                    raise Unrepairable(f'Diff exceeds the review limit: {len(public_diff)} characters, limit {review_limit} '
                                   '(limits.review_diff_max_chars). The diff is never truncated; split the feature '
                                   'into smaller slices or raise the limit.')
                 review = agent_stage(provider, session, 'review', review_tree,
@@ -1256,7 +1256,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                 'review_summary': review['summary']}
                     continue
                 if not review['approved'] and not review['findings']:
-                    raise Blocked('Reviewer withheld approval without explaining a defect.')
+                    raise Unrepairable('Reviewer withheld approval without explaining a defect.')
                 if not review['approved'] and review['findings']:
                     summary.setdefault('advisory_review_notes', []).append(
                         {'attempt': attempt, 'findings': review['findings']})
@@ -1280,7 +1280,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                         feedback = {'cause': 'security_review_blockers', 'findings': sec_blockers}
                         continue
                     if not sec['approved'] and not sec['findings']:
-                        raise Blocked('Security reviewer withheld approval without specific findings.')
+                        raise Unrepairable('Security reviewer withheld approval without specific findings.')
                     security = sec
                 if git(code_tree, 'rev-parse', 'HEAD') != base_commit:
                     raise Blocked('Final worktree HEAD differs from trusted base commit')
@@ -1301,7 +1301,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 # Infrastructural errors are not evidence that a code change is wrong.
                 feedback = {'cause': 'verification_or_review_blocker', 'error': str(ex)[:1000]}
                 print(f'[AI Nest] attempt {attempt} blocked: {ex}', flush=True)
-                if 'withheld approval' in str(ex) or 'Diff exceeds' in str(ex):
+                if isinstance(ex, Unrepairable):
                     break
         if accepted is not None:
             print(f'[AI Nest] fixing the review findings did not pass the gates again; '

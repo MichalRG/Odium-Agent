@@ -283,8 +283,7 @@ def migrate_existing_config(dst: Path) -> None:
     merged['version'] = 2
     merged['policy_version'] = '2026-11'
     if merged != old:
-        import datetime
-        backup = dst / '.ai-nest' / 'config-backups' / f'nest.config.{datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")}.json'
+        backup = dst / '.ai-nest' / 'config-backups' / f'nest.config.{dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")}.json'
         backup.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(target, backup)
         target.write_text(json.dumps(merged, indent=2) + '\n', encoding='utf-8')

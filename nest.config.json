@@ -91,6 +91,7 @@
       "gradlew.bat",
       "gradle-wrapper.properties",
       "gradle-wrapper.jar",
+      "libs.versions.toml",
       "go.mod",
       "go.sum",
       ".golangci.yml",
@@ -120,6 +121,7 @@
       "**/__tests__/**",
       "**/e2e/**",
       "**/integration_tests/**",
+      "**/androidTest/**",
       "test_*.py",
       "**/test_*.py",
       "*_test.py",
@@ -225,7 +227,8 @@
       "*login*",
       "*payment*",
       "*migration*",
-      "*.sql"
+      "*.sql",
+      "*AndroidManifest.xml"
     ]
   },
   "policy_version": "2026-11",

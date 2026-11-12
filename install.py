@@ -396,11 +396,13 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     print('  python ai_nest/cli.py doctor --provider codex')
 
 
-# First match per folder wins, so the more specific stack comes first.
+# First match per folder wins, so the more specific stack comes first. Gradle templates run
+# ./gradlew, so they match only the wrapper's folder, never a module folder below it.
 STACK_MARKERS = [('angular', ('angular.json',)), ('python-uv', ('uv.lock',)),
                  ('python', ('pyproject.toml', 'requirements.txt', 'setup.py')),
                  ('typescript', ('tsconfig.json', 'package.json')), ('java-maven', ('pom.xml',)),
-                 ('java-gradle', ('build.gradle', 'build.gradle.kts')), ('go', ('go.mod',)),
+                 ('android-kotlin', ('*/src/main/AndroidManifest.xml',)),
+                 ('java-gradle', ('gradlew',)), ('go', ('go.mod',)),
                  ('dotnet', ('*.csproj', '*.sln'))]
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 

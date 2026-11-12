@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 600,
+  "required_suites": [
+    "static",
+    "unit",
+    "build"
+  ],
+  "checks": [
+    {
+      "name": "lint",
+      "suite": "static",
+      "cwd": ".",
+      "argv": [
+        "./gradlew",
+        "lintDebug",
+        "--console=plain"
+      ],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "unit",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "./gradlew",
+        "testDebugUnitTest",
+        "--console=plain"
+      ],
+      "timeout_seconds": 1200
+    },
+    {
+      "name": "assemble",
+      "suite": "build",
+      "cwd": ".",
+      "argv": [
+        "./gradlew",
+        "assembleDebug",
+        "--console=plain"
+      ],
+      "timeout_seconds": 1200
+    }
+  ]
+}

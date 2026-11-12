@@ -41,12 +41,13 @@ python /path/to/odium-agent/install.py /your/git/repo --local --template python-
 | `python-uv` | `uv run --locked ruff check .`, `uv run --locked pytest -q` | adds `uv sync --locked`; ruff and pytest are dev dependencies |
 | `java-maven` | `mvn -B -ntp test`, `mvn -DskipTests package` | Maven downloads dependencies itself |
 | `java-gradle` | `./gradlew test`, `./gradlew assemble` | uses the project's Gradle wrapper |
+| `android-kotlin` | `./gradlew lintDebug`, `./gradlew testDebugUnitTest`, `./gradlew assembleDebug` | Android app with Kotlin and the Gradle wrapper; needs a JDK and the Android SDK through `ANDROID_HOME`, because `local.properties` is not in a fresh checkout. Instrumented tests (`src/androidTest`) need an emulator and are not run. Add `ktlint` or `detekt` checks if the project uses them |
 | `typescript` | `tsc --noEmit`, `npm test`, `npm run build` | also adds `npm ci` to `environment.setup_commands` |
 | `angular` | `npm test -- --watch=false`, `ng build` | adds `npm ci`; Karma needs a headless browser in containers |
 | `go` | `go vet ./...`, `go test ./...`, `go build ./...` | |
 | `dotnet` | `dotnet build`, `dotnet test` | |
 
-Every template has a `unit` suite, which `tdd.red_commands` runs for the RED step. Build and dependency files (`pom.xml`, Gradle/Maven wrappers, `go.mod`, `*.csproj`, `package.json`, `pyproject.toml`, lint configs) are protected from coding agents.
+Every template has a `unit` suite, which `tdd.red_commands` runs for the RED step. Build and dependency files (`pom.xml`, Gradle/Maven wrappers, the Gradle version catalog `libs.versions.toml`, `go.mod`, `*.csproj`, `package.json`, `pyproject.toml`, lint configs) are protected from coding agents.
 
 Without a template, copy `scripts/verify.config.json.example` to `scripts/verify.config.json`. Edit it to list **real** unit, integration, static, build, and security commands. Do not accept the example without matching the project. `nest.config.json` must contain `verification.commands=[{"name":"verify-all","argv":["bash","scripts/verify.sh"],"cwd":"."}]` and the safety protections in the supplied v4.4 config.
 

@@ -403,6 +403,24 @@ class LocalInstallTests(unittest.TestCase):
             self.assertEqual(p.returncode, 2, value + p.stderr)
             self.assertFalse((self.repo / 'scripts/verify.config.json').exists())
 
+    def test_gradle_stacks_are_suggested_only_where_the_wrapper_is(self):
+        spec = importlib.util.spec_from_file_location('nest_installer', ROOT / 'install.py')
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        layouts = {
+            ('gradlew', 'settings.gradle.kts', 'app/build.gradle.kts',
+             'app/src/main/AndroidManifest.xml'): ['android-kotlin'],
+            ('gradlew', 'build.gradle.kts', 'api/build.gradle.kts'): ['java-gradle'],
+            ('mobile/gradlew', 'mobile/app/src/main/AndroidManifest.xml', 'server/go.mod'):
+                ['android-kotlin:mobile', 'go:server'],
+        }
+        for files, expected in layouts.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                for name in files:
+                    (Path(tmp) / name).parent.mkdir(parents=True, exist_ok=True)
+                    (Path(tmp) / name).write_text('')
+                self.assertEqual(installer.detect_stacks(Path(tmp)), expected, files)
+
     def test_every_template_is_a_valid_manifest_with_a_unit_suite(self):
         limit = json.loads((ROOT / 'nest.config.json').read_text())['limits']['check_timeout_seconds']
         (self.repo / 'scripts').mkdir()

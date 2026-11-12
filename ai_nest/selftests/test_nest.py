@@ -87,6 +87,14 @@ class NestTests(unittest.TestCase):
         self.assertEqual(len(nest.blocking_findings(review, cfg)), 1)
         self.assertEqual(nest.blocking_findings(review, cfg)[0]['severity'], 'high')
 
+    def test_android_tests_catalog_and_manifest_are_guarded(self):
+        cfg = json.loads((nest.ROOT / 'nest.config.json').read_text())
+        self.assertTrue(nest.is_test_file('app/src/androidTest/java/com/x/LoginTest.kt', cfg))
+        self.assertTrue(nest.is_test_file('app/src/test/java/com/x/LoginViewModelTest.kt', cfg))
+        self.assertFalse(nest.is_test_file('app/src/main/java/com/x/LoginViewModel.kt', cfg))
+        self.assertTrue(nest.is_blocked_file('gradle/libs.versions.toml', cfg))
+        self.assertTrue(nest.needs_security_review(['app/src/main/AndroidManifest.xml'], cfg)[0])
+
     def test_routing_final_diff(self):
         cfg = json.loads((nest.ROOT / 'nest.config.json').read_text())
         self.assertFalse(nest.needs_security_review(['src/button.css'], cfg)[0])

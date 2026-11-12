@@ -128,6 +128,26 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(other.read_text(),'name: Project CI\n')
         self.assertTrue(list((self.repo / '.ai-nest/config-backups').glob('ai-nest-verify.yml.*.bak')))
 
+    def test_update_keeps_project_files_and_backs_up_changed_nest_files(self):
+        (self.repo / 'scripts').mkdir()
+        (self.repo / 'scripts/verify.sh').write_text('echo project gate\n')
+        (self.repo / 'install.py').write_text("print('project installer')\n")
+        self.install()
+        prompt = self.repo / 'ai_nest/prompts/review.md'
+        prompt.write_text('edited by hand\n')
+        for _ in range(2):  # a plain rerun must not turn the project's files into Nest files
+            self.install()
+        updated = command(self.repo, sys.executable, str(ROOT / 'install.py'), str(self.repo), '--update-code')
+        self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
+        self.assertEqual((self.repo / 'scripts/verify.sh').read_text(), 'echo project gate\n')
+        self.assertEqual((self.repo / 'install.py').read_text(), "print('project installer')\n")
+        self.assertEqual(prompt.read_text(), (ROOT / 'ai_nest/prompts/review.md').read_text())
+        backups = self.repo / '.ai-nest/config-backups'
+        self.assertEqual([p.read_text() for p in backups.glob('review.md.*.bak')], ['edited by hand\n'])
+        self.assertFalse(list(backups.glob('cli.py.*.bak')), 'a Nest file nobody changed needs no backup')
+        files = json.loads((self.repo / 'ai_nest/installation.json').read_text())['files']
+        self.assertEqual((files['scripts/verify.sh']['status'], files['ai_nest/cli.py']['status']), ('project', 'installed'))
+
     def test_upgrade_reconciles_stale_rules_and_timeout(self):
         self.install()
         (self.repo/'CLAUDE.md').write_text('Keep custom project rule\nNew behavior gets a test\nUse .claude/agents/ for every review\n')

@@ -215,17 +215,25 @@ def report_legacy_files(dst: Path) -> list[str]:
     return notes
 
 
-def write_installation_manifest(dst: Path, installed: list[str], preserved: list[str], mode: str = 'committed') -> Path:
+def previous_records(dst: Path) -> dict | None:
+    """What the last install recorded per Nest path; None before the first install.
+
+    'installed': the Nest wrote the file, sha256 is what it wrote. 'project': the project's own file
+    at a Nest path, never replaced by --update-code. 'preserved': origin unknown (older installers).
+    """
+    try:
+        files = json.loads((dst / 'ai_nest' / 'installation.json').read_text(encoding='utf-8'))['files']
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return {name: entry for name, entry in files.items() if isinstance(entry, dict)} if isinstance(files, dict) else None
+
+
+def write_installation_manifest(dst: Path, records: dict, mode: str = 'committed') -> Path:
     """Diagnostic integrity manifest, not a security boundary against agents."""
-    relative_files = [name for name in FILES if (dst / name).is_file()]
-    statuses = {}
-    for name in relative_files:
-        statuses[name] = {'status': 'preserved' if name in preserved else 'installed',
-                          'sha256': sha256_file(dst / name)}
     path = dst / 'ai_nest' / 'installation.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({'release': RELEASE, 'mode': mode, 'generated_at': dt.datetime.now(dt.timezone.utc).isoformat(),
-                                'files': statuses, 'configuration_schema': 2}, indent=2) + '\n', encoding='utf-8')
+                                'files': records, 'configuration_schema': 2}, indent=2) + '\n', encoding='utf-8')
     return path
 
 
@@ -305,6 +313,8 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     if dst == SOURCE:
         raise RuntimeError('Source and destination cannot be the same folder')
     installed, preserved = [], []
+    previous = previous_records(dst)
+    records = {}
     # Local mode never writes a file the project tracks.
     tracked = tracked_files(dst) if local else set()
     updatable = ('ai_nest/', '.agents/skills/', '.claude/skills/')
@@ -314,26 +324,37 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
         target = dst / name
         if (local or not git) and name == '.github/workflows/ai-nest-verify.yml':
             continue  # CI checkouts cannot see an uncommitted Nest
-        if name in tracked:
+        record = (previous or {}).get(name, {})
+        status = record.get('status')
+        # A file found at a Nest path on the first install, or where the Nest never installed one, is
+        # the project's. An upgrade of an install without a manifest cannot tell, so it backs files up.
+        project_file = target.is_file() and (status == 'project' or (previous is None and not update_code)
+                                             or (previous is not None and name not in previous))
+        if name in tracked or (project_file and not force):
             preserved.append(name)
+            if target.is_file():
+                records[name] = {'status': 'project', 'sha256': sha256_file(target)}
             continue
         replace_on_update = (name.startswith(updatable) or name in updatable_files
                              or name == '.github/workflows/ai-nest-verify.yml')
         if target.exists() and not force and not (update_code and replace_on_update):
             preserved.append(name)
+            records[name] = record or {'status': 'preserved', 'sha256': sha256_file(target)}
             continue
-        # Back up existing Nest-owned CI because projects may have customized it.
-        if update_code and name == '.github/workflows/ai-nest-verify.yml' and target.is_file():
-            old_ci = target.read_text(encoding='utf-8', errors='replace')
-            if 'AI Nest' not in old_ci and 'AI Nest verification' not in old_ci:
-                preserved.append(name)
-                print('WARNING: Non-Nest CI workflow at .github/workflows/ai-nest-verify.yml left unchanged.')
-                continue
-            backup = backup_file(dst, target)
-            print(f'WARNING: upgrading AI Nest CI workflow; review custom steps and backup: {backup}')
+        if update_code and name == '.github/workflows/ai-nest-verify.yml' and target.is_file() \
+                and 'AI Nest' not in target.read_text(encoding='utf-8', errors='replace'):
+            preserved.append(name)
+            records[name] = {'status': 'project', 'sha256': sha256_file(target)}
+            print('WARNING: Non-Nest CI workflow at .github/workflows/ai-nest-verify.yml left unchanged.')
+            continue
+        # Keep a copy of anything that is not exactly what the Nest wrote last time.
+        written = record.get('sha256') if status == 'installed' else None
+        if target.is_file() and sha256_file(target) not in (written, sha256_file(source)):
+            print(f'Backed up {name} before replacing it: {backup_file(dst, target)}')
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         installed.append(name)
+        records[name] = {'status': 'installed', 'sha256': sha256_file(target)}
     if update_code and not force:
         migrate_existing_config(dst)
         if not local:  # these edit project instruction files
@@ -381,7 +402,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     # Keep it in place as a historical diagnostic, but write the active manifest
     # into the tracked ai_nest/ directory.
     mode = 'local' if local else 'committed' if git else 'no-git'
-    manifest_path = write_installation_manifest(dst, installed, preserved, mode)
+    manifest_path = write_installation_manifest(dst, records, mode)
     print(f'Installation manifest: {manifest_path}' + (' (commit this file)' if mode == 'committed' else ''))
     print('Installed/updated:')
     for name in installed:
@@ -524,9 +545,11 @@ def main():
     p.add_argument('repository', type=Path)
     p.add_argument('--yes', action='store_true',
                    help='Do not prompt: run git init, ignore large files, use detected stacks and make the first commit')
-    p.add_argument('--force', action='store_true', help='Replace AI Nest core/config files (never replaces existing instruction bridges)')
+    p.add_argument('--force', action='store_true', help='Replace AI Nest core/config files, also project files at Nest paths, after backing up changed ones '
+                        '(never replaces existing instruction bridges)')
     p.add_argument('--update-code', action='store_true',
-                   help='Upgrade runtime, skills, verifier and docs; migrate supported v1 config with a backup, preserve other settings and instructions')
+                   help='Upgrade runtime, skills, verifier and docs; migrate supported v1 config with a backup, preserve other settings and instructions; '
+                        'keep project files at Nest paths and back up Nest files changed since the last install')
     p.add_argument('--local', action='store_true',
                    help='Keep AI Nest out of the project history: list its files in .git/info/exclude and never modify tracked files')
     p.add_argument('--template', type=template_spec, action='append', metavar='NAME[:FOLDER]',

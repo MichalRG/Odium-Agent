@@ -1,0 +1,19 @@
+# CI of the Nest's own repository. Projects get ai_nest/templates/ai-nest-verify.yml from install.py.
+name: Nest self-tests
+on:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run the verify gate (the self-test suite)
+        run: bash scripts/verify.sh

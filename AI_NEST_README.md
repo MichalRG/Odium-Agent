@@ -1,6 +1,6 @@
 # AI Engineering Nest v4.4 — portable agent orchestrator
 
-Provider-independent Python orchestrator for **Codex CLI** and **Claude Code CLI**. The `build-feature` skill is only an entrypoint: the actual stage transitions and gates live in `ai_nest/cli.py`.
+Provider-independent Python orchestrator for **Codex CLI**, **Claude Code CLI** and **GitHub Copilot CLI**. The `build-feature` skill is only an entrypoint: the actual stage transitions and gates live in `ai_nest/cli.py`.
 
 ## Install or upgrade
 
@@ -70,7 +70,7 @@ For Python, also install declared pinned dependencies (e.g. an appropriate `pip 
 
 ### Models per agent stage
 
-`models` in `nest.config.json` picks the model and reasoning effort for each agent stage, per provider. A stage without an entry uses `default`; a provider without entries uses its CLI's own default (for Claude Code that is the account default, because agents run with project settings only). The nest passes them as `codex exec -m <model> -c model_reasoning_effort="<effort>"` or `claude --model <model> --effort <effort>` and prints the choice for every stage.
+`models` in `nest.config.json` picks the model and reasoning effort for each agent stage, per provider. A stage without an entry uses `default`; a provider without entries uses its CLI's own default (for Claude Code that is the account default, because agents run with project settings only). The nest passes them as `codex exec -m <model> -c model_reasoning_effort="<effort>"` `claude --model <model> --effort <effort>` or `copilot --model <model> --reasoning-effort <effort>`, and prints the choice for every stage. The shipped configuration has no `copilot` entries, so Copilot stages use your account's default model; add entries with Copilot's own model names (for example `claude-sonnet-5.5`, as `/model` in Copilot CLI lists them).
 
 ```json
 "models": {
@@ -89,7 +89,7 @@ For Python, also install declared pinned dependencies (e.g. an appropriate `pip 
 
 Full model IDs keep runs reproducible; Claude aliases such as `opus` or `fable` follow the newest version instead.
 
-Stages: `explore`, `specify`, `plan`, `tests`, `protected_tests`, `implement`, `repair`, `bootstrap`, `review`, `security_review`. Upgrading adds the release defaults for missing entries and keeps yours. The chat that runs `$build-feature` uses your own Codex or Claude settings, not this section.
+Stages: `explore`, `specify`, `plan`, `tests`, `protected_tests`, `implement`, `repair`, `bootstrap`, `review`, `security_review`. Upgrading adds the release defaults for missing entries and keeps yours. The chat that runs `$build-feature` uses your own Codex, Claude or Copilot settings, not this section.
 
 ### TDD configuration
 
@@ -129,7 +129,7 @@ git add -A  # review `git diff --cached` before committing
 
 ### Start a feature
 
-The easy way is one chat: Codex `$build-feature <what you want>` or Claude Code `/build-feature <what you want>`. GitHub Copilot CLI loads the same skill from `.agents/skills/`: ask it to use the `build-feature` skill. Its subagents still run on Codex or Claude. The chat comes back to you only when the nest has questions, when the plan is ready for your approval, and with the result. It uses these two commands, which you can also run yourself:
+The easy way is one chat: Codex `$build-feature <what you want>` or Claude Code `/build-feature <what you want>`. GitHub Copilot CLI loads the same skill from `.agents/skills/`: ask it to use the `build-feature` skill, with `--provider copilot` to run the subagents on Copilot too. The chat comes back to you only when the nest has questions, when the plan is ready for your approval, and with the result. It uses these two commands, which you can also run yourself:
 
 ```bash
 # 1. Scout, specify and plan, then stop. Changes no code.
@@ -147,7 +147,9 @@ The plan also lists the commits for the finished work: each one a coherent chang
 
 Build a large request in slices: one plan, approval, run and merge per slice, all in the same `--session`, each planned after the previous slice is merged. The chat proposes slices when a plan is large. Smaller slices verify faster, get a more focused review and lose less when an attempt fails.
 
-To skip the approval, `run --session <name> --allow-host-execution "<request>"` does both steps in one command and blocks on open questions. Use `--provider claude` for Claude Code agents.
+To skip the approval, `run --session <name> --allow-host-execution "<request>"` does both steps in one command and blocks on open questions. Use `--provider claude` for Claude Code agents or `--provider copilot` for GitHub Copilot CLI agents.
+
+**Copilot CLI as provider.** Log in once with `copilot login`. Copilot CLI has no option to enforce an output schema, so the orchestrator appends the stage schema to the prompt, reads the last assistant message from `--output-format json` and checks it against the schema itself; an answer that does not match blocks the stage like invalid JSON from the other providers. Read-only stages run with `--deny-tool=write`. Copilot's own `--sandbox` is not used, because it needs host features many containers lack.
 
 ### Start from an empty project (`bootstrap`)
 
@@ -160,7 +162,7 @@ python ai_nest/cli.py bootstrap --provider claude --allow-host-execution \
 
 `bootstrap` runs explore, specify and plan, then one scaffolding agent that sees the exact check and setup commands. It may **create** build files, lockfiles, a `.gitignore` per project folder and one smoke test per test runner. It may not modify or delete existing build, test or gate files, and never touches Nest files. The orchestrator refuses to start when the baseline already passes, blocks changes that contain `node_modules/`, `.venv/` or `__pycache__/`, verifies the result in a fresh checkout with your setup commands and always runs the security reviewer, because the scaffold adds dependencies. The report lists `created_protected_files`: review them before you commit, because from then on they are protected gates. TDD is skipped for this run only. The agent needs network access for the package managers (Codex: the bootstrap stage enables sandbox network access). Add a second stack later the same way: add its checks, commit, run `bootstrap` again.
 
-Skill invocation: Codex `$build-feature ...` or Claude Code `/build-feature ...`. For long-running commands, use a terminal/job runner that supports the complete CLI lifetime; a single Claude Code Bash tool call may time out. Do not assume a skill invocation itself is an external durable job.
+Skill invocation: Codex `$build-feature ...`, Claude Code `/build-feature ...`, or ask Copilot CLI to use the `build-feature` skill. For long-running commands, use a terminal/job runner that supports the complete CLI lifetime; a single Claude Code Bash tool call may time out. Do not assume a skill invocation itself is an external durable job.
 
 ## Actual v4.4 workflow
 

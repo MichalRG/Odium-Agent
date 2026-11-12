@@ -1,6 +1,6 @@
 # Odium Agent: AI Engineering Nest
 
-An orchestrator that takes a feature request from idea to verified, reviewed code. It runs **Codex CLI** or **Claude Code** as separate subagents, one per step, and checks their work itself: tests must fail before the code exists, pass in a fresh checkout afterwards, and go through an independent review. You approve the plan and decide on the merge.
+An orchestrator that takes a feature request from idea to verified, reviewed code. It runs **Codex CLI**, **Claude Code** or **GitHub Copilot CLI** as separate subagents, one per step, and checks their work itself: tests must fail before the code exists, pass in a fresh checkout afterwards, and go through an independent review. You approve the plan and decide on the merge.
 
 ## How it works
 
@@ -37,11 +37,11 @@ flowchart TD
     result -- you say merge --> merge(["Commits as planned, fast-forward merge"])
 ```
 
-Each box is a separate subagent: its own Codex or Claude process, with its own model and effort per step. Gates are checks the orchestrator runs itself, not an agent. Dotted lines are loops with a fixed budget of attempts. Nothing is pushed: the result is a verified branch on your machine.
+Each box is a separate subagent: its own Codex, Claude or Copilot process, with its own model and effort per step. Gates are checks the orchestrator runs itself, not an agent. Dotted lines are loops with a fixed budget of attempts. Nothing is pushed: the result is a verified branch on your machine.
 
 ## Quick start
 
-Requirements: Python 3.11+, Git, Bash, and the `codex` or `claude` CLI.
+Requirements: Python 3.11+, Git, Bash, and the `codex`, `claude` or `copilot` CLI.
 
 ```bash
 # Install into your project; --local keeps the Nest out of the project's Git history
@@ -54,7 +54,7 @@ Then, in the project, start a chat and describe the feature:
 
 - Codex: `$build-feature <what you want>`
 - Claude Code: `/build-feature <what you want>`
-- GitHub Copilot CLI: it loads the same skill from `.agents/skills/`; ask it to use the `build-feature` skill. The subagents still run on Codex or Claude, so one of them must be installed.
+- GitHub Copilot CLI: it loads the same skill from `.agents/skills/`; ask it to use the `build-feature` skill and say `--provider copilot` to run the subagents on Copilot as well.
 
 The chat comes back to you only with questions, with the plan for approval, and with the result.
 

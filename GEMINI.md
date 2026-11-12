@@ -2,4 +2,4 @@
 
 @./AGENTS.md
 
-For enforced end-to-end features use `python ai_nest/cli.py run` with an installed Codex or Claude CLI backend. Gemini is not yet a runner backend in this starter kit.
+For enforced end-to-end features use `python ai_nest/cli.py run` with an installed Codex, Claude or Copilot CLI backend. Gemini is not yet a runner backend in this starter kit.

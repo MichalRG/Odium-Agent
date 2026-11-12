@@ -507,6 +507,34 @@ class NestTests(unittest.TestCase):
                 with self.assertRaisesRegex(nest.Blocked, 'Invalid models.codex'):
                     nest.CLIProvider('codex', {'models': {'codex': bad}}, Path('.'))
 
+    def test_copilot_provider_puts_the_schema_in_the_prompt_and_reads_the_last_answer(self):
+        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': []}
+        events = [{'type': 'assistant.message', 'data': {'content': 'Looking around first.'}},
+                  {'type': 'assistant.message', 'data': {'content': 'Done.\n```json\n' + json.dumps(answer) + '\n```'}},
+                  {'type': 'result', 'exitCode': 0}]
+        calls = []
+        def fake_call(argv, cwd, timeout, input_text=None, **watch):
+            calls.append((argv, input_text))
+            return subprocess.CompletedProcess(argv, 0, '\n'.join(map(json.dumps, events)), '')
+        models = {'copilot': {'default': {'model': 'claude-sonnet-5.5', 'effort': 'high'}}}
+        with tempfile.TemporaryDirectory() as tmp, patch('builtins.print'), \
+                patch.object(nest.shutil, 'which', return_value='/usr/bin/copilot'), \
+                patch.object(nest, 'call', side_effect=fake_call):
+            agent = nest.CLIProvider('copilot', {'models': models}, Path(tmp))
+            self.assertEqual(agent.run('explore', Path(tmp), {'x': 'a'}), answer)
+            agent.run('explore', Path(tmp), {'x': 'a'})
+            self.assertTrue((Path(tmp) / 'explore_02.json').is_file(), 'a second attempt keeps the first artifacts')
+        argv, prompt = calls[0]
+        self.assertEqual(argv[:5], ['copilot', '--model', 'claude-sonnet-5.5', '--reasoning-effort', 'high'])
+        self.assertIn('--deny-tool=write', argv)  # read-only stage
+        self.assertIn('"relevant_files"', prompt)  # the schema travels in the prompt
+        events[1]['data']['content'] = 'No JSON here.'
+        with tempfile.TemporaryDirectory() as tmp, patch('builtins.print'), \
+                patch.object(nest.shutil, 'which', return_value='/usr/bin/copilot'), \
+                patch.object(nest, 'call', side_effect=fake_call):
+            with self.assertRaisesRegex(nest.Blocked, 'invalid JSON'):
+                nest.CLIProvider('copilot', {}, Path(tmp)).run('explore', Path(tmp), {})
+
     def test_extra_observations_keep_the_most_severe_instead_of_blocking(self):
         def obs(severity, n):
             return {'kind': 'fact', 'severity': severity, 'summary': f'{severity}{n}', 'evidence': 'e',

@@ -250,9 +250,13 @@ class NestTests(unittest.TestCase):
                               'stdout_tail': 'AssertionError: 1 != 2', 'stderr_tail': ''}]}
         self.assertEqual(nest.validate_red_result(result, ['test_add (tests.T)']), 'expected_red')
 
-    def test_red_accepts_new_symbol_errors_from_java_go_and_csharp(self):
+    def test_red_accepts_new_symbol_errors_from_java_kotlin_go_and_csharp(self):
         cases = [('src/test/java/CalcTest.java', 'class CalcTest { @Test void testAdd() { new Calc(); } }', 'testAdd',
                   '[ERROR] /x/src/test/java/CalcTest.java:[1,40] cannot find symbol\n[ERROR]   symbol:   class Calc'),
+                 ('app/src/test/java/CalcTest.kt', 'class CalcTest { @Test fun testAdd() { Calc().add(1, 2) } }', 'testAdd',
+                  "e: file:///x/app/src/test/java/CalcTest.kt:1:40 Unresolved reference 'Calc'."),
+                 ('app/src/test/java/CalcTest.kt', 'class CalcTest { @Test fun testAdd() { Calc().add(1, 2) } }', 'testAdd',
+                  'e: /x/app/src/test/java/CalcTest.kt: (1, 40): Unresolved reference: Calc'),
                  ('calc_test.go', 'func TestAdd(t *testing.T) { Add(1, 2) }', 'TestAdd', './calc_test.go:1:31: undefined: Add'),
                  ('Calc.Tests/CalcTests.cs', 'public void TestAdd() { Calc.Add(1, 2); }', 'TestAdd',
                   "Calc.Tests/CalcTests.cs(1,25): error CS0103: The name 'Calc' does not exist in the current context")]

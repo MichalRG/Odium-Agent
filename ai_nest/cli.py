@@ -809,6 +809,7 @@ MISSING_SYMBOL_PATTERNS = (
     r"has no exported member ['\"]([A-Za-z_]\w*)['\"]",
     r"Property ['\"]([A-Za-z_]\w*)['\"] does not exist",
     r"symbol:\s+(?:class|interface|enum|record|method|variable)\s+([A-Za-z_]\w*)",  # javac
+    r"Unresolved reference:?\s+['`]?([A-Za-z_]\w*)",  # kotlinc: K2 "'Calc'." and K1 ": Calc"
     r"undefined: ([A-Za-z_]\w*)",  # go
     r"The (?:type or namespace )?name '([A-Za-z_]\w*)'",  # C#
 )

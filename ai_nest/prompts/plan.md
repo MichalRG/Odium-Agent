@@ -21,7 +21,7 @@ Plan how the finished work splits into commits that a reviewer can read one at a
 - Keep refactoring, moved files and formatting out of behaviour commits, in commits of their own.
 - Put generated files, such as lockfiles, in the commit that needs them.
 - Every task belongs to exactly one commit; a commit can hold several small tasks.
-- Write each message as an imperative subject of at most 72 characters, for example `Add source map with an independent check`.
+- Write each message in English, whatever language the request uses, as an imperative subject of at most 72 characters, for example `Add source map with an independent check`.
 
 ## Output
 

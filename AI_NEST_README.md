@@ -143,7 +143,7 @@ python ai_nest/cli.py plan --provider codex --session projects-pagination \
 python ai_nest/cli.py run --from-plan <plan-run-id> --provider codex --allow-host-execution
 ```
 
-The plan also lists the commits for the finished work: each one a coherent change with its tests, in dependency order. The report repeats them as `planned_commits`, and the chat commits along them at the merge.
+The plan also lists the commits for the finished work: each one a coherent change with its tests, in dependency order, with its message in English. The report repeats them as `planned_commits`, and the chat commits along them at the merge.
 
 Build a large request in slices: one plan, approval, run and merge per slice, all in the same `--session`, each planned after the previous slice is merged. The chat proposes slices when a plan is large. Smaller slices verify faster, get a more focused review and lose less when an attempt fails.
 

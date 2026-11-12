@@ -54,6 +54,8 @@ LOCAL_EXCLUDES = ['/.ai-nest/', '/ai_nest/', '/install.py', '/nest.config.json',
                   '/GEMINI.md', '/.github/copilot-instructions.md']
 # Build/dependency output that would otherwise leak into agent change sets.
 GENERATED_IGNORES = ['__pycache__/', '*.pyc', '.pytest_cache/', '.DS_Store', 'node_modules/', 'dist/', 'build/', 'coverage/']
+# A workspace verifies each repository with its own checks, so it gets no verify.sh, CI workflow or self-tests.
+WORKSPACE_SKIPS = ('scripts/', '.github/', 'ai_nest/templates/ai-nest-verify.yml', 'ai_nest/selftests/')
 EXCLUDE_BEGIN, EXCLUDE_END = '# >>> AI Nest local install (managed by install.py) >>>', '# <<< AI Nest local install <<<'
 
 
@@ -73,12 +75,11 @@ def tracked_files(dst: Path) -> set[str]:
     return set(filter(None, p.stdout.split('\0')))
 
 
-def write_local_excludes(dst: Path, tracked: set[str]) -> Path:
-    """Hide Nest files via .git/info/exclude: local to this clone, never committed."""
+def write_local_excludes(dst: Path, entries: list[str]) -> Path:
+    """Hide files via .git/info/exclude: local to this clone, never committed."""
     out = subprocess.run(['git', 'rev-parse', '--git-path', 'info/exclude'], cwd=dst,
                          capture_output=True, text=True, check=True).stdout.strip()
     path = Path(out) if Path(out).is_absolute() else dst / out
-    entries = [e for e in LOCAL_EXCLUDES if e.strip('/') not in tracked] + GENERATED_IGNORES
     block = '\n'.join([EXCLUDE_BEGIN, *entries, EXCLUDE_END])
     old = path.read_text(encoding='utf-8') if path.is_file() else ''
     pattern = re.compile(re.escape(EXCLUDE_BEGIN) + '.*?' + re.escape(EXCLUDE_END), re.S)
@@ -99,21 +100,27 @@ def template_spec(value: str) -> tuple[str, str]:
     return name, folder
 
 
+def template_checks(specs: list[tuple[str, str]]) -> tuple[list[dict], list[dict], list[str]]:
+    """Checks, setup commands and required suites of the stack templates, run in each stack's folder."""
+    checks, setup, suites = [], [], []
+    for name, folder in specs:
+        part = json.loads((SOURCE / 'ai_nest' / 'templates' / 'verify' / f'{name}.json').read_text(encoding='utf-8'))
+        # Several stacks share one manifest, so names get a folder prefix to stay unique.
+        prefix = '' if len(specs) == 1 else re.sub(r'[^A-Za-z0-9_-]', '-', folder if folder != '.' else name) + '-'
+        checks += [{**c, 'name': prefix + c['name'], 'cwd': folder} for c in part['checks']]
+        setup += [{**c, 'name': prefix + c['name'], 'cwd': folder} for c in part.get('nest_setup_commands', [])]
+        suites += [x for x in part.get('required_suites', []) if x not in suites]
+    return checks, setup, suites
+
+
 def apply_template(dst: Path, specs: list[tuple[str, str]], force: bool) -> None:
     target = dst / 'scripts' / 'verify.config.json'
     label = ' + '.join(f'{name}:{folder}' for name, folder in specs)
     if target.exists() and not force:
         print(f'Template {label}: scripts/verify.config.json already exists; left unchanged.')
         return
-    data = {'version': 1, 'default_timeout_seconds': 600, 'required_suites': [], 'checks': []}
-    setup = []
-    for name, folder in specs:
-        part = json.loads((SOURCE / 'ai_nest' / 'templates' / 'verify' / f'{name}.json').read_text(encoding='utf-8'))
-        # Several stacks share one manifest, so names get a folder prefix to stay unique.
-        prefix = '' if len(specs) == 1 else re.sub(r'[^A-Za-z0-9_-]', '-', folder if folder != '.' else name) + '-'
-        data['checks'] += [{**c, 'name': prefix + c['name'], 'cwd': folder} for c in part['checks']]
-        setup += [{**c, 'name': prefix + c['name'], 'cwd': folder} for c in part.get('nest_setup_commands', [])]
-        data['required_suites'] += [x for x in part.get('required_suites', []) if x not in data['required_suites']]
+    checks, setup, suites = template_checks(specs)
+    data = {'version': 1, 'default_timeout_seconds': 600, 'required_suites': suites, 'checks': checks}
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
     print(f'Template {label}: wrote scripts/verify.config.json; edit commands and cwd for your layout.')
@@ -124,6 +131,33 @@ def apply_template(dst: Path, specs: list[tuple[str, str]], force: bool) -> None
         env['setup_commands'] = setup  # fresh worktrees have no node_modules
         cfg_path.write_text(json.dumps(cfg, indent=2) + '\n', encoding='utf-8')
         print('  Added environment.setup_commands: ' + ', '.join(s['name'] for s in setup))
+
+
+def configure_workspace(dst: Path) -> list[str]:
+    """Give each repository its own checks, from the stacks found in it; entries already there are kept."""
+    path = dst / 'nest.config.json'
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        print('WARNING: nest.config.json is invalid; workspace.repos not updated.')
+        return []
+    before = json.dumps(cfg)
+    repos = cfg.setdefault('workspace', {}).setdefault('repos', {})
+    # Runs use the repository's checks; the single-repository verify.sh commands would only mislead.
+    cfg.setdefault('verification', {})['commands'] = []
+    cfg.setdefault('tdd', {})['red_commands'] = []
+    lines = []
+    for name in nested_repositories(dst):
+        # Build output must not leak into a run's change set; the block stays in this clone only.
+        write_local_excludes(dst / name, GENERATED_IGNORES)
+        if name not in repos:
+            checks, setup, _ = template_checks([template_spec(s) for s in detect_stacks(dst / name)])
+            repos[name] = {'checks': checks, 'setup_commands': setup}
+        names = [c.get('name', '?') for c in repos[name].get('checks', [])] if isinstance(repos[name], dict) else []
+        lines.append(f'{name}: ' + (', '.join(names) or 'NO CHECKS: add them by hand'))
+    if json.dumps(cfg) != before:
+        path.write_text(json.dumps(cfg, indent=2) + '\n', encoding='utf-8')
+    return lines
 
 
 def sha256_file(path: Path) -> str:
@@ -312,6 +346,10 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     local = local and git
     if dst == SOURCE:
         raise RuntimeError('Source and destination cannot be the same folder')
+    workspace = not git and bool(nested_repositories(dst))
+    if workspace and templates:
+        raise RuntimeError('--template writes scripts/verify.config.json, which a workspace does not use; '
+                           'edit workspace.repos in nest.config.json instead')
     installed, preserved = [], []
     previous = previous_records(dst)
     records = {}
@@ -324,6 +362,8 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
         target = dst / name
         if (local or not git) and name == '.github/workflows/ai-nest-verify.yml':
             continue  # CI checkouts cannot see an uncommitted Nest
+        if workspace and name.startswith(WORKSPACE_SKIPS):
+            continue
         record = (previous or {}).get(name, {})
         status = record.get('status')
         # A file found at a Nest path on the first install, or where the Nest never installed one, is
@@ -385,6 +425,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
             print('  Review against AGENTS.md; coder should not be instructed to modify tests.')
     if templates:
         apply_template(dst, templates, force)
+    configured = configure_workspace(dst) if workspace else []
     ignores = dst / '.gitignore'
     lines = ignores.read_text(encoding='utf-8').splitlines() if ignores.exists() else []
     wanted = ['.ai-nest/', *GENERATED_IGNORES]
@@ -392,7 +433,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     if not git:
         pass
     elif local:
-        exclude = write_local_excludes(dst, tracked)
+        exclude = write_local_excludes(dst, [e for e in LOCAL_EXCLUDES if e.strip('/') not in tracked] + GENERATED_IGNORES)
         installed.append(f'{exclude.relative_to(dst) if exclude.is_relative_to(dst) else exclude} (AI Nest block)')
     elif missing:
         with ignores.open('a', encoding='utf-8') as f:
@@ -401,7 +442,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     # The legacy .ai-nest/installation.json is ignored and cannot survive cloning.
     # Keep it in place as a historical diagnostic, but write the active manifest
     # into the tracked ai_nest/ directory.
-    mode = 'local' if local else 'committed' if git else 'no-git'
+    mode = 'local' if local else 'committed' if git else 'workspace' if workspace else 'no-git'
     manifest_path = write_installation_manifest(dst, records, mode)
     print(f'Installation manifest: {manifest_path}' + (' (commit this file)' if mode == 'committed' else ''))
     print('Installed/updated:')
@@ -411,6 +452,18 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
         print('Preserved (not overwritten):')
         for name in preserved:
             print('  =', name)
+    if workspace:
+        repos = nested_repositories(dst)
+        print(f'\nWorkspace install in {dst}. Git repositories inside: {", ".join(repos)}.')
+        print('A run works in one repository, on a new branch and worktree of it, and verifies the change with')
+        print("that repository's checks: workspace.repos in nest.config.json, found from its stacks. Edit them to fit:")
+        for line in configured:
+            print('  ' + line)
+        print('Next:')
+        print(f'  python ai_nest/cli.py doctor --repo {repos[0]} --provider codex')
+        print(f'  python ai_nest/cli.py verify --repo {repos[0]} --allow-host-execution  # runs its checks once')
+        print(f'  python ai_nest/cli.py plan --repo {repos[0]} --allow-host-execution "<request>"')
+        return
     manifest = dst / 'scripts' / 'verify.config.json'
     if not manifest.is_file():
         print('\nACTION REQUIRED: scripts/verify.config.json is not configured.')
@@ -518,7 +571,8 @@ def guided_setup(args) -> int:
     if git and interactive and not args.local and not args.update_code:
         args.local = confirm('Keep AI Nest out of the project history (local install, nothing to commit)?', True)
     templates = args.template
-    while not templates and not (dst / 'scripts' / 'verify.config.json').exists():
+    workspace = not git and bool(nested_repositories(dst))  # its repositories get their checks in install()
+    while not templates and not workspace and not (dst / 'scripts' / 'verify.config.json').exists():
         suggested = ' '.join(detect_stacks(dst))
         answer = ask(f'Which stacks should the checks cover? Enter NAME[:FOLDER] values ({", ".join(TEMPLATES)}),\n'
                      f'for example "python-uv:app angular:frontend". Empty = configure later. [{suggested}]', suggested)

@@ -50,6 +50,8 @@ python /path/to/odium-agent/install.py /your/git/repo --local --template python
 
 The installer only copies the Nest's files and writes the check configuration. It never starts an agent.
 
+For a folder of several repositories (for example the repositories of one product), install into the folder itself: it becomes a workspace, where each run works in one repository and verifies with that repository's own checks. See [Workspaces](AI_NEST_README.md#workspaces-a-folder-of-several-repositories).
+
 Then, in the project, start a chat and describe the feature:
 
 - Codex: `$build-feature <what you want>`

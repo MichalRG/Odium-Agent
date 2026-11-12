@@ -26,7 +26,7 @@ python /path/to/odium-agent/install.py /your/git/repo --update-code
 
 The installer only sets the Nest up: it copies its files and writes the check configuration. It never starts an agent and never changes project code; features and `bootstrap` start from the chat.
 
-**Without Git** the installer copies the Nest's files and skips every Git step (`.git/info/exclude`, `.gitignore`, the CI workflow, the first commit). Runs need Git: `doctor`, `plan` and `run` say so until you run `git init`, make a first commit and rerun the installer with `--update-code`. For a folder that holds several repositories, the installer lists them; install into each repository you want to work on.
+**Without Git** the installer copies the Nest's files and skips every Git step (`.git/info/exclude`, `.gitignore`, the CI workflow, the first commit). Runs need Git: `doctor`, `plan` and `run` say so until you run `git init`, make a first commit and rerun the installer with `--update-code`. A folder that holds several repositories becomes a workspace; see the next section.
 
 Without a terminal (scripts, CI, agents), it asks nothing and does nothing extra. `--yes` takes the defaults without asking: `git init` (except in a folder that holds repositories), ignore large files, the detected stacks and the first commit. It never starts `bootstrap`. An agent should ask the user first, then call for example `install.py <folder> --local --yes --template python-uv:app`.
 
@@ -150,6 +150,31 @@ Build a large request in slices: one plan, approval, run and merge per slice, al
 To skip the approval, `run --session <name> --allow-host-execution "<request>"` does both steps in one command and blocks on open questions. Use `--provider claude` for Claude Code agents or `--provider copilot` for GitHub Copilot CLI agents.
 
 **Copilot CLI as provider.** Log in once with `copilot login`. Copilot CLI has no option to enforce an output schema, so the orchestrator appends the stage schema to the prompt, reads the last assistant message from `--output-format json` and checks it against the schema itself; an answer that does not match blocks the stage like invalid JSON from the other providers. Read-only stages run with `--deny-tool=write`. Copilot's own `--sandbox` is not used, because it needs host features many containers lack.
+
+### Workspaces: a folder of several repositories
+
+Install into a folder that is not a Git repository but holds some (for example the repositories of one product, cloned side by side), and the installer makes a **workspace**:
+
+```bash
+python /path/to/odium-agent/install.py ~/work/product
+```
+
+- The Nest goes into the folder itself. There is no `git init`, no `scripts/verify.sh`, no CI workflow and no self-tests: each repository is verified with its own checks.
+- `nest.config.json` gets `workspace.repos`: one entry per repository, with `checks` and `setup_commands` filled from the stacks the installer finds in it (the same templates as `--template`). Every check needs a `suite`: the `static` ones run on the new tests, the `unit` ones are the RED run, and all of them gate the result. A repository without a detected stack gets no checks, and runs in it block until you add them. Rerun the installer with `--update-code` after cloning another repository: entries you edited are kept.
+- Each repository's `.git/info/exclude` gets a block that ignores build output (`node_modules/`, `__pycache__/` and so on), so it does not leak into a run's change set. The block stays in that clone; nothing is committed.
+
+Every command names the repository with `--repo`, run from the workspace folder:
+
+```bash
+python ai_nest/cli.py doctor --repo api --provider codex
+python ai_nest/cli.py verify --repo api --allow-host-execution  # runs api's checks once in the clone
+python ai_nest/cli.py plan --repo api --session orders --allow-host-execution "<request>"
+python ai_nest/cli.py run --repo api --from-plan <run-id> --allow-host-execution
+```
+
+A run works in one repository: the branch `ai-nest/<run-id>` and its worktrees belong to that repository, and only its checks run. Runs and sessions are stored in the workspace's `.ai-nest/`, so the repository gets nothing but the branch. The agents get the workspace folder and the names of the other repositories as reference material: the read-only stages (explore, specify, plan, reviews) may read them, and Claude and Copilot get the workspace with `--add-dir` for those stages. Writing stages keep their file tools in the worktree. For Codex nothing extra is passed; what it may read outside the worktree is up to its sandbox settings. The target repository's own `AGENTS.md`, when it has one, is added to every prompt.
+
+A feature that spans repositories is one run per repository, with the same `--session`, so that the later runs see the plans and handoffs of the earlier ones.
 
 ### Start from an empty project (`bootstrap`)
 

@@ -24,6 +24,9 @@ scenario = os.environ.get('NEST_FAKE_SCENARIO', 'happy')
 if os.environ.get('NEST_FAKE_ARGV'):
     with open(os.environ['NEST_FAKE_ARGV'], 'a') as argv_log:
         argv_log.write(json.dumps(args) + '\n')
+if os.environ.get('NEST_FAKE_PROMPTS'):
+    with open(os.environ['NEST_FAKE_PROMPTS'], 'a') as prompt_log:
+        prompt_log.write(prompt)
 notes = []
 if '# Role: explorer' in prompt:
     result = {'summary':'explored', 'relevant_files':['calc.py'], 'risks':[]}
@@ -322,6 +325,65 @@ class EndToEndTests(unittest.TestCase):
         for bad in ('../../etc', 'x' * 20):
             p = self.nest(root, env, 'run', '--from-plan', bad, '--allow-host-execution')
             self.assertIn('Not a run id', p.stderr)
+
+    def test_workspace_run_works_in_one_repository_with_its_own_checks(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        workspace = Path(handle.name) / 'product'
+        calc, notes = workspace / 'calc', workspace / 'notes'
+        for repo in (calc, notes):
+            repo.mkdir(parents=True)
+            for argv in (('init', '-q'), ('config', 'user.email', 't@example.invalid'), ('config', 'user.name', 'T')):
+                cmd(repo, 'git', *argv)
+        (notes / 'api.md').write_text('add(a, b) returns the sum\n')
+        (calc / 'calc.py').write_text('def add(a,b):\n    return 0\n')
+        (calc / 'AGENTS.md').write_text('Keep calc functions pure.\n')
+        (calc / 'tests').mkdir()
+        (calc / 'tests/test_existing.py').write_text(
+            'import unittest\nfrom calc import add\nclass TestExisting(unittest.TestCase):\n'
+            '    def test_zero(self):\n        self.assertEqual(add(0,0),0)\n')
+        for repo in (calc, notes):
+            cmd(repo, 'git', 'add', '-A')
+            self.assertEqual(cmd(repo, 'git', 'commit', '-qm', 'base').returncode, 0)
+        p = cmd(workspace, sys.executable, str(ROOT / 'install.py'), str(workspace), '--yes')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        cfg = json.loads((workspace / 'nest.config.json').read_text())
+        unit = [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v']
+        cfg['workspace']['repos']['calc'] = {'checks': [
+            {'name': 'lint', 'suite': 'static', 'cwd': '.', 'argv': [sys.executable, '-c', 'print("lint ok")']},
+            {'name': 'unit', 'suite': 'unit', 'cwd': '.', 'argv': unit}]}
+        cfg['limits']['max_repair_attempts'] = 1
+        (workspace / 'nest.config.json').write_text(json.dumps(cfg))
+        bin_path = Path(handle.name) / 'bin'
+        bin_path.mkdir()
+        (bin_path / 'codex').write_text(FAKE.replace('PYTHON', sys.executable, 1))
+        (bin_path / 'codex').chmod(0o755)
+        prompts = Path(handle.name) / 'prompts.txt'
+        env = {**os.environ, 'PATH': str(bin_path) + os.pathsep + os.environ['PATH'],
+               'NEST_FAKE_SCENARIO': 'happy', 'NEST_FAKE_PROMPTS': str(prompts)}
+        p = self.nest(workspace, env, 'plan', '--repo', 'calc', '--session', 'calc', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('run --repo calc --from-plan', p.stdout)
+        plan_id = next((workspace / '.ai-nest/runs').iterdir()).name
+        p = self.nest(workspace, env, 'run', '--repo', 'notes', '--from-plan', plan_id, '--allow-host-execution')
+        self.assertIn('pass that folder as --repo', p.stderr)
+        p = self.nest(workspace, env, 'run', '--repo', 'calc', '--from-plan', plan_id, '--allow-host-execution')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        run_dir = next(d for d in (workspace / '.ai-nest/runs').iterdir() if d.name != plan_id)
+        report = json.loads((run_dir / 'report.json').read_text())
+        self.assertEqual(report['status'], 'verified')
+        self.assertIn('a+b', (Path(report['worktree']) / 'calc.py').read_text())
+        self.assertNotEqual(cmd(calc, 'git', 'branch', '--list', report['branch']).stdout, '')
+        # Runs and sessions live in the workspace; the repository gets only its branch and worktree.
+        self.assertFalse((calc / '.ai-nest').exists())
+        self.assertEqual(cmd(calc, 'git', 'status', '--porcelain').stdout, '')
+        self.assertTrue((workspace / '.ai-nest/sessions').is_dir())
+        verification = json.loads(Path(report['verification']).read_text())
+        self.assertEqual([c['name'] for c in verification['checks']], ['lint', 'unit'])
+        text = prompts.read_text()
+        self.assertIn('"other_repositories": [\n', text)
+        self.assertIn('"notes"', text)
+        self.assertIn('Keep calc functions pure.', text)
 
     def run_scenario(self, scenario, local=False):
         root, env = self.feature_project(scenario, local)

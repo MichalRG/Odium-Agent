@@ -385,6 +385,36 @@ class GuidedSetupTests(unittest.TestCase):
         self.assertFalse((self.root / '.git').exists())
         self.assertIn('Git repositories inside: calendar, tracker', p.stdout)
 
+    def test_workspace_gives_each_repository_its_own_checks(self):
+        for name, marker in (('calendar', 'pyproject.toml'), ('tracker', 'go.mod')):
+            (self.root / name).mkdir()
+            command(self.root / name, 'git', 'init', '-q')
+            (self.root / name / marker).write_text('x\n')
+        p = self.setup('--yes')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('calendar: lint, unit', p.stdout)
+        self.assertEqual(json.loads((self.root / 'ai_nest/installation.json').read_text())['mode'], 'workspace')
+        for absent in ('scripts', '.github/workflows', 'ai_nest/selftests', '.git'):
+            self.assertFalse((self.root / absent).exists(), absent)
+        cfg = json.loads((self.root / 'nest.config.json').read_text())
+        repos = cfg['workspace']['repos']
+        self.assertEqual([c['name'] for c in repos['tracker']['checks']], ['vet', 'unit', 'build'])
+        self.assertEqual((cfg['verification']['commands'], cfg['tdd']['red_commands']), ([], []))
+        # A rerun keeps the owner's edits and adds a repository cloned since.
+        repos['calendar']['checks'] = [{'name': 'unit', 'suite': 'unit', 'argv': ['true']}]
+        (self.root / 'nest.config.json').write_text(json.dumps(cfg))
+        (self.root / 'wiki').mkdir()
+        command(self.root / 'wiki', 'git', 'init', '-q')
+        p = self.setup('--update-code')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        repos = json.loads((self.root / 'nest.config.json').read_text())['workspace']['repos']
+        self.assertEqual(repos['calendar']['checks'], [{'name': 'unit', 'suite': 'unit', 'argv': ['true']}])
+        self.assertEqual(repos['wiki'], {'checks': [], 'setup_commands': []})
+        self.assertIn('wiki: NO CHECKS', p.stdout)
+        p = self.setup('--template', 'go')
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('workspace.repos', p.stderr)
+
 
 class LocalInstallTests(unittest.TestCase):
     def setUp(self):

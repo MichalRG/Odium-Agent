@@ -535,6 +535,64 @@ class NestTests(unittest.TestCase):
             with self.assertRaisesRegex(nest.Blocked, 'invalid JSON'):
                 nest.CLIProvider('copilot', {}, Path(tmp)).run('explore', Path(tmp), {})
 
+    def test_workspace_repository_runs_with_its_own_checks(self):
+        lint = {'name': 'lint', 'suite': 'static', 'argv': ['ruff', 'check']}
+        unit = {'name': 'unit', 'suite': 'unit', 'argv': ['pytest']}
+        cfg = {'tdd': {'enabled': True}, 'verification': {'commands': ['bash scripts/verify.sh']},
+               'workspace': {'repos': {'api': {'checks': [lint, unit]}, 'web': {'checks': []}, 'docs': {}}}}
+        home = Path('/w')
+        run = nest.workspace_config(cfg, home, home / 'api')
+        self.assertEqual(run['verification']['commands'], [lint, unit])
+        self.assertEqual(run['tdd']['red_commands'], [unit])
+        self.assertEqual(run['workspace_run'], {'workspace': '/w', 'repository': 'api',
+                                                'other_repositories': ['docs', 'web']})
+        for repo, error in (('web', 'No checks for web'), ('docs', 'No checks for docs'),
+                            ('new', 'new is not in workspace.repos')):
+            with self.assertRaisesRegex(nest.Blocked, error):
+                nest.workspace_config(cfg, home, home / repo)
+        cfg['workspace']['repos']['web']['checks'] = [{'name': 'lint', 'argv': ['eslint']}]
+        with self.assertRaisesRegex(nest.Blocked, 'need a "suite"'):
+            nest.workspace_config(cfg, home, home / 'web')
+        cfg['workspace']['repos']['web']['checks'] = [lint]
+        with self.assertRaisesRegex(nest.Blocked, 'no "unit" check'):
+            nest.workspace_config(cfg, home, home / 'web')
+
+    def test_workspace_static_checks_are_judged_one_by_one(self):
+        checks = [{'name': 'lint', 'suite': 'static', 'argv': ['ruff']},
+                  {'name': 'tsc', 'suite': 'static', 'argv': ['tsc']},
+                  {'name': 'unit', 'suite': 'unit', 'argv': ['pytest']}]
+        logs = {'ruff': 't.py:1:1: I001 Import block is un-sorted',
+                'tsc': "t.spec.ts(1,10): error TS2305: Module '\"./calc\"' has no exported member 'multiply'."}
+        def run_checks(tree, cfg, output, label):
+            [check] = cfg['verification']['commands']
+            return {'passed': False, 'checks': [{'stdout_tail': logs[check['argv'][0]], 'stderr_tail': ''}]}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(nest, 'run_checks', side_effect=run_checks) as run:
+            log = nest.public_tests_static_failure(Path(tmp), {'verification': {'commands': checks}},
+                                                   Path(tmp) / 'out.json')
+        self.assertEqual(run.call_count, 2)  # static checks only
+        self.assertIn('I001', log)
+        self.assertNotIn('TS2305', log)  # the type checker's expected RED
+
+    def test_workspace_read_only_stages_may_read_the_other_repositories(self):
+        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': []}
+        calls = []
+        def fake_call(argv, cwd, timeout, input_text=None, **watch):
+            calls.append((argv, input_text))
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'structured_output': answer}), '')
+        with tempfile.TemporaryDirectory() as tmp, patch('builtins.print'), \
+                patch.object(nest.shutil, 'which', return_value='/usr/bin/claude'), \
+                patch.object(nest, 'call', side_effect=fake_call):
+            (Path(tmp) / 'api').mkdir()
+            (Path(tmp) / 'api/AGENTS.md').write_text('Keep handlers thin.\n')
+            cfg = {'workspace_run': {'workspace': tmp, 'repository': 'api', 'other_repositories': ['web']}}
+            agent = nest.CLIProvider('claude', cfg, Path(tmp))
+            agent.run('explore', Path(tmp), {})
+            agent.run('explore', Path(tmp), {}, write=True)
+        (read_argv, prompt), (write_argv, _) = [c for c in calls if c[0][0] == 'claude']
+        self.assertEqual(read_argv[read_argv.index('--add-dir') + 1], tmp)
+        self.assertNotIn('--add-dir', write_argv)
+        self.assertIn('Keep handlers thin.', prompt)  # the target repository's own rules
+
     def test_extra_observations_keep_the_most_severe_instead_of_blocking(self):
         def obs(severity, n):
             return {'kind': 'fact', 'severity': severity, 'summary': f'{severity}{n}', 'evidence': 'e',

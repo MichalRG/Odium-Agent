@@ -63,6 +63,10 @@ def validate(raw: object) -> dict:
     for index, step in enumerate(checks):
         if not isinstance(step, dict):
             raise ConfigError(f"Check {index + 1}: expected object")
+        # A misspelt key (timeout_second, cwd) would silently fall back to its default.
+        unknown = set(step) - {"name", "suite", "argv", "cwd", "timeout_seconds"}
+        if unknown:
+            raise ConfigError(f"Check {index + 1}: unknown keys {', '.join(sorted(unknown))}")
         name = step.get("name")
         suite = step.get("suite")
         argv = step.get("argv")

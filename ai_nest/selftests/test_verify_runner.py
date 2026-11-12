@@ -95,6 +95,13 @@ class VerifyRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.report()["checks"][0]["status"], "error")
 
+    def test_misspelt_check_key_fails_closed(self):
+        step = self.step("one", "unit", "print(1)")
+        step["timeout_second"] = step.pop("timeout_seconds")
+        result = self.run_verify(self.config([step]))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown keys timeout_second", result.stderr)
+
     def test_timeout_is_failure(self):
         cfg = self.config([self.step("slow", "unit", "import time; time.sleep(3)", timeout=1)])
         result = self.run_verify(cfg)

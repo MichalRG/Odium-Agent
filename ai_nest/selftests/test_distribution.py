@@ -342,10 +342,28 @@ class GuidedSetupTests(unittest.TestCase):
         self.assertEqual({(c['name'], c['cwd']) for c in checks}, {('lint', 'app'), ('unit', 'app')})
 
     def test_script_without_yes_never_runs_git_init(self):
+        # Without Git the Nest files are copied and every Git step is skipped, instead of blocking.
         p = self.setup()
-        self.assertEqual(p.returncode, 1)
-        self.assertIn('--yes', p.stderr)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertFalse((self.root / '.git').exists())
+        self.assertFalse((self.root / '.gitignore').exists())
+        self.assertFalse((self.root / '.github/workflows/ai-nest-verify.yml').exists())
+        self.assertTrue((self.root / 'ai_nest/cli.py').is_file())
+        self.assertEqual(json.loads((self.root / 'ai_nest/installation.json').read_text())['mode'], 'no-git')
+        self.assertIn('no Git step ran', p.stdout)
+        doctor = subprocess.run([sys.executable, 'ai_nest/cli.py', 'doctor'], cwd=self.root,
+                                capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(doctor.returncode, 0)
+        self.assertIn('is not a Git repository', doctor.stdout + doctor.stderr)
+
+    def test_folder_of_repositories_gets_no_parent_repository(self):
+        for name in ('calendar', 'tracker'):
+            (self.root / name).mkdir()
+            command(self.root / name, 'git', 'init', '-q')
+        p = self.setup('--yes')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertFalse((self.root / '.git').exists())
+        self.assertIn('Git repositories inside: calendar, tracker', p.stdout)
 
 
 class LocalInstallTests(unittest.TestCase):

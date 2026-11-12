@@ -18,7 +18,7 @@ python /path/to/odium-agent/install.py /your/git/repo --update-code
 ```
 
 **Guided setup.** Run in a terminal, the installer asks about everything the flags leave open:
-- whether to run `git init` when the folder is not a repository;
+- whether to run `git init` when the folder is not a repository (default no). It is not offered for a folder that holds Git repositories, because a parent repository would break them;
 - whether to add files of 5 MB or more to `.gitignore` while the repository has no commits;
 - whether to use a local install;
 - which stacks to configure (`NAME[:FOLDER]`), suggesting the ones it detects in the root and first-level folders;
@@ -26,7 +26,9 @@ python /path/to/odium-agent/install.py /your/git/repo --update-code
 
 The installer only sets the Nest up: it copies its files and writes the check configuration. It never starts an agent and never changes project code; features and `bootstrap` start from the chat.
 
-Without a terminal (scripts, CI, agents), it asks nothing and does nothing extra, and a folder without Git stays an error. `--yes` takes the defaults without asking: `git init`, ignore large files, the detected stacks and the first commit. It never starts `bootstrap`. An agent should ask the user first, then call for example `install.py <folder> --local --yes --template python-uv:app`.
+**Without Git** the installer copies the Nest's files and skips every Git step (`.git/info/exclude`, `.gitignore`, the CI workflow, the first commit). Runs need Git: `doctor`, `plan` and `run` say so until you run `git init`, make a first commit and rerun the installer with `--update-code`. For a folder that holds several repositories, the installer lists them; install into each repository you want to work on.
+
+Without a terminal (scripts, CI, agents), it asks nothing and does nothing extra. `--yes` takes the defaults without asking: `git init` (except in a folder that holds repositories), ignore large files, the detected stacks and the first commit. It never starts `bootstrap`. An agent should ask the user first, then call for example `install.py <folder> --local --yes --template python-uv:app`.
 
 **Local install (`--local`).** The installer lists every Nest file in `.git/info/exclude` (a per-clone ignore file that is never committed) and never modifies files the project tracks: an existing `AGENTS.md`, `CLAUDE.md`, `.gitignore` or `.claude/settings.json` is left as it is. It adds the same build-output rules as committed mode (`__pycache__/`, `node_modules/`, `dist/` and so on) to that block. `git status` stays clean, so there is nothing to commit. The orchestrator copies its trusted files (`scripts/verify.*`, `nest.config.json`, instruction files) into every worktree and blocks an agent stage that changes or deletes them, because Git cannot see edits to excluded files. Limits: the Nest exists only in this clone (each developer or container installs it), there is no AI Nest CI job, and to commit a file of your own at an excluded path (for example a new `AGENTS.md`) use `git add -f` or remove its line from the `AI Nest local install` block. To uninstall, delete the files listed in that block and the block itself.
 

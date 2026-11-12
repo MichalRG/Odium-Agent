@@ -54,6 +54,17 @@ GENERATED_IGNORES = ['__pycache__/', '*.pyc', '.pytest_cache/', '.DS_Store', 'no
 EXCLUDE_BEGIN, EXCLUDE_END = '# >>> AI Nest local install (managed by install.py) >>>', '# <<< AI Nest local install <<<'
 
 
+def has_git(dst: Path) -> bool:
+    try:
+        return (dst / '.git').exists() or git_out(dst, 'rev-parse', '--show-toplevel').returncode == 0
+    except OSError:  # Git itself is not installed
+        return False
+
+
+def nested_repositories(dst: Path) -> list[str]:
+    return [p.name for p in sorted(dst.iterdir()) if p.is_dir() and (p / '.git').exists()]
+
+
 def tracked_files(dst: Path) -> set[str]:
     p = subprocess.run(['git', 'ls-files', '-z'], cwd=dst, capture_output=True, text=True)
     return set(filter(None, p.stdout.split('\0')))
@@ -286,8 +297,9 @@ def migrate_existing_config(dst: Path) -> None:
 def install(dst: Path, force: bool = False, update_code: bool = False, local: bool = False,
             templates: list[tuple[str, str]] | None = None) -> None:
     dst = dst.resolve()
-    if not (dst / '.git').exists() and subprocess.run(['git', 'rev-parse', '--show-toplevel'], cwd=dst, capture_output=True).returncode:
-        raise RuntimeError('Destination must be an existing Git repository')
+    # Without Git the files are copied and every Git step is skipped; runs need Git later.
+    git = has_git(dst)
+    local = local and git
     if dst == SOURCE:
         raise RuntimeError('Source and destination cannot be the same folder')
     installed, preserved = [], []
@@ -298,7 +310,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     for name in FILES:
         source = SOURCE / name
         target = dst / name
-        if local and name == '.github/workflows/ai-nest-verify.yml':
+        if (local or not git) and name == '.github/workflows/ai-nest-verify.yml':
             continue  # CI checkouts cannot see an uncommitted Nest
         if name in tracked:
             preserved.append(name)
@@ -354,7 +366,9 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     lines = ignores.read_text(encoding='utf-8').splitlines() if ignores.exists() else []
     wanted = ['.ai-nest/', *GENERATED_IGNORES]
     missing = [rule for rule in wanted if rule not in lines]
-    if local:
+    if not git:
+        pass
+    elif local:
         exclude = write_local_excludes(dst, tracked)
         installed.append(f'{exclude.relative_to(dst) if exclude.is_relative_to(dst) else exclude} (AI Nest block)')
     elif missing:
@@ -364,8 +378,9 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     # The legacy .ai-nest/installation.json is ignored and cannot survive cloning.
     # Keep it in place as a historical diagnostic, but write the active manifest
     # into the tracked ai_nest/ directory.
-    manifest_path = write_installation_manifest(dst, installed, preserved, 'local' if local else 'committed')
-    print(f'Installation manifest: {manifest_path}' + ('' if local else ' (commit this file)'))
+    mode = 'local' if local else 'committed' if git else 'no-git'
+    manifest_path = write_installation_manifest(dst, installed, preserved, mode)
+    print(f'Installation manifest: {manifest_path}' + (' (commit this file)' if mode == 'committed' else ''))
     print('Installed/updated:')
     for name in installed:
         print('  +', name)
@@ -379,6 +394,15 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
         print(f'  rerun with --template NAME[:FOLDER] ({", ".join(TEMPLATES)}), or:')
         print('  cp scripts/verify.config.json.example scripts/verify.config.json')
         print('  Edit checks and required_suites for your project; no tests are assumed to pass.')
+    if not git:
+        print(f'\nNo Git repository in {dst}: the Nest files are copied, and no Git step ran.')
+        nested = nested_repositories(dst)
+        if nested:
+            print(f'  Git repositories inside: {", ".join(nested)}. Runs work per repository, so to use the Nest')
+            print(f'  in one of them, install into it: python {SOURCE / "install.py"} {dst / nested[0]} --local')
+        print('  Runs need Git: when you want them here, run git init, make a first commit and rerun this')
+        print('  installer with --update-code.')
+        return
     if local:
         print('\nLocal install: Nest files are listed in .git/info/exclude, so git status stays clean and nothing is committed.')
         print('Next: configure real project checks, then run:')
@@ -454,19 +478,21 @@ def guided_setup(args) -> int:
         return ask(f'{question} [{"Y/n" if default else "y/N"}]', 'y' if default else 'n').lower().startswith('y')
 
     dst = args.repository.resolve()
-    if git_out(dst, 'rev-parse', '--show-toplevel').returncode:
-        if not confirm(f'{dst} is not a Git repository. Run git init?', True):
-            raise RuntimeError('Destination must be an existing Git repository (or pass --yes to run git init)')
+    git = has_git(dst)
+    # Git is opt-in: never for a folder that holds repositories, which a parent repository would break.
+    if not git and not nested_repositories(dst) and confirm(
+            f'{dst} is not a Git repository. Run git init? (No: copy the files and skip every Git step)', args.yes):
         git_out(dst, 'init', '-q')
         print(f'Initialized Git repository in {dst}')
-    fresh = bool(git_out(dst, 'rev-parse', '--verify', '-q', 'HEAD').returncode)
+        git = True
+    fresh = git and bool(git_out(dst, 'rev-parse', '--verify', '-q', 'HEAD').returncode)
     if fresh:
         big = large_paths(dst)
         listing = '\n  '.join(f'{rule}  ({size // (1024 * 1024)} MB)' for rule, size in big)
         if big and confirm(f'These large files should not go into Git:\n  {listing}\nAdd them to .gitignore?', True):
             with (dst / '.gitignore').open('a', encoding='utf-8') as f:
                 f.write(''.join(f'{rule}\n' for rule, _ in big))
-    if interactive and not args.local and not args.update_code:
+    if git and interactive and not args.local and not args.update_code:
         args.local = confirm('Keep AI Nest out of the project history (local install, nothing to commit)?', True)
     templates = args.template
     while not templates and not (dst / 'scripts' / 'verify.config.json').exists():

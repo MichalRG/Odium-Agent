@@ -1481,6 +1481,12 @@ def main() -> int:
     args = parser.parse_args()
     repo = Path(args.repo).resolve()
     try:
+        if args.command in ('doctor', 'plan', 'run', 'bootstrap') and \
+                call(['git', 'rev-parse', '--show-toplevel'], repo, 30).returncode:
+            raise Blocked(f'{repo} is not a Git repository. AI Nest runs need Git: every stage works in a '
+                          'worktree pinned to a commit. Run git init, make a first commit and rerun install.py '
+                          'with --update-code. A folder that holds several repositories needs the Nest inside '
+                          'each repository instead.')
         if args.command == 'doctor':
             return doctor(repo, args.provider)
         if args.command == 'run' and args.from_plan:

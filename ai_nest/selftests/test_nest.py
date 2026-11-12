@@ -74,6 +74,17 @@ class NestTests(unittest.TestCase):
         with self.assertRaisesRegex(nest.Blocked, 'infrastructure'):
             nest.validate_red_result(result, ['test_add'])
 
+    def test_red_accepts_tests_that_assert_on_error_names(self):
+        for error in ("<class 'SyntaxError'>", "<class 'FileNotFoundError'> (ENOENT)"):
+            log = f'FAILED tests/test_parser.py::test_rejects_bad_input - Failed: DID NOT RAISE {error}\n1 failed'
+            result = {'checks': [{'name': 'unit', 'exit_code': 1, 'stdout_tail': log, 'stderr_tail': ''}]}
+            self.assertEqual(nest.validate_red_result(result, ['test_rejects_bad_input']), 'expected_red', error)
+        # The same words still mean a broken run when the expected test never ran.
+        broken = {'checks': [{'name': 'unit', 'exit_code': 1, 'stderr_tail': '',
+                              'stdout_tail': 'Test suite failed to run\nSyntaxError: Unexpected token'}]}
+        with self.assertRaisesRegex(nest.Blocked, 'infrastructure'):
+            nest.validate_red_result(broken, ['test_rejects_bad_input'])
+
     def test_sanitized_feedback_never_contains_protected_assertions(self):
         raw = {'checks': [{'name': 'verify-all', 'exit_code': 1,
                            'stderr_tail': 'assert secret_value == 42', 'stdout_tail': 'PRIVATE_TEST'}]}
@@ -468,6 +479,16 @@ class NestTests(unittest.TestCase):
             with patch.object(nest, 'run_checks', return_value=failed(
                     "t.spec.ts(1,10): error TS2305: Module '\"./calc\"' has no exported member 'multiply'.")):
                 self.assertEqual(nest.public_tests_static_failure(tree, {}, tree / 'out.json'), '')
+            # verify.sh runs every static check: the type checker's expected RED must not hide the lint error.
+            suite = ('\n=== lint [static] ===\nt.py:1:1: I001 Import block is un-sorted\n=== lint: failed ===\n'
+                     "\n=== tsc [static] ===\nt.spec.ts(1,10): error TS2305: Module '\"./calc\"' has no exported "
+                     "member 'multiply'.\n=== tsc: failed ===\n"
+                     '\n=== format [static] ===\n=== format: passed ===\n'
+                     '\nVerification FAILED: 1/3 checks passed\n')
+            with patch.object(nest, 'run_checks', return_value=failed(suite)):
+                log = nest.public_tests_static_failure(tree, {}, tree / 'out.json')
+            self.assertIn('I001', log)
+            self.assertNotIn('TS2305', log)
 
     def test_models_per_stage_fall_back_to_default_and_reject_unsafe_values(self):
         models = {'codex': {'default': {'model': 'gpt-6.1-sol', 'effort': 'medium'},

@@ -838,10 +838,13 @@ def public_tests_static_failure(tree: Path, cfg: dict, output: Path) -> str:
         return ''
     log = '\n'.join(c.get('stdout_tail', '') + '\n' + c.get('stderr_tail', '') + c.get('error', '')
                     for c in result['checks'])
-    # Type checkers (tsc, go vet) also fail on symbols the coder has yet to add; that is expected RED.
-    if any(re.search(p, log, re.IGNORECASE) for p in MISSING_SYMBOL_PATTERNS + MISSING_MODULE_PATTERNS):
-        return ''
-    return log[-4000:]
+    # verify.py starts each check with `=== name [suite] ===`: judge every check on its own output,
+    # so a type checker's expected RED cannot hide a lint error from another check.
+    failures = [part for part in re.split(r'(?m)^=== [\w-]+ \[\w+\] ===$', log)
+                if part.strip() and not re.search(r'(?m)^=== [\w-]+: passed ===$', part)
+                # Type checkers (tsc, go vet) also fail on symbols the coder has yet to add; that is expected RED.
+                and not any(re.search(p, part, re.IGNORECASE) for p in MISSING_SYMBOL_PATTERNS + MISSING_MODULE_PATTERNS)]
+    return '\n'.join(failures)[-4000:]
 
 
 def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | None = None,
@@ -859,10 +862,14 @@ def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | 
     logs = '\n'.join(c.get('stdout_head', '') + '\n' + c.get('stdout_tail', '') + '\n' + c.get('stderr_tail', '')
                      for c in checks)
     low = logs.lower()
+    keys = [red_test_key(name) for name in expected_names]
+    named = all(key in logs for key in keys)
     invalid = ('no tests found', 'no tests ran', 'collected 0 items', 'command not found',
-               'not found: command', 'syntaxerror', 'connection refused', 'enoent',
-               'error: could not find a version', 'fixture not found')
-    if any(marker in low for marker in invalid):
+               'not found: command', 'connection refused', 'error: could not find a version', 'fixture not found')
+    # A test can assert on these errors itself (a parser, file handling); they mean a broken run only
+    # when the expected tests never ran.
+    broken_unless_named = ('syntaxerror', 'enoent')
+    if any(marker in low for marker in invalid) or (not named and any(m in low for m in broken_unless_named)):
         raise Blocked('RED failed due to infrastructure, syntax, or collection—not intended missing behavior.')
     codes = [c.get('exit_code') for c in checks]
     if all(code == 0 for code in codes):
@@ -879,7 +886,6 @@ def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | 
                for m in re.finditer(pattern, logs, re.IGNORECASE)]
     sources = [(name, (public_tree / name).read_text(encoding='utf-8', errors='replace'))
                for name in (public_files or []) if public_tree and (public_tree / name).is_file()]
-    keys = [red_test_key(name) for name in expected_names]
     names_in_tests = bool(sources) and all(any(key in text for _, text in sources) for key in keys)
     test_trace = any(name in logs or Path(name).name in logs for name, _ in sources)
 
@@ -918,7 +924,7 @@ def validate_red_result(result: dict, expected_names: list[str], *, cfg: dict | 
         raise Blocked('RED failed due to infrastructure, syntax, or collection—not intended missing behavior.')
     if any(code not in (0, 1) for code in codes):
         raise Blocked('Non-assertion RED exit requires evidence of a missing new symbol.')
-    if not all(key in logs for key in keys):
+    if not named:
         raise Blocked('RED evidence does not mention expected test names or a specific missing-symbol diagnosis.')
     return 'expected_red'
 

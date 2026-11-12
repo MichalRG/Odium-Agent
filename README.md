@@ -48,10 +48,13 @@ Requirements: Python 3.11+, Git, Bash, and the `codex` or `claude` CLI.
 python /path/to/odium-agent/install.py /your/git/repo --local --template python
 ```
 
+The installer only copies the Nest's files and writes the check configuration. It never starts an agent.
+
 Then, in the project, start a chat and describe the feature:
 
 - Codex: `$build-feature <what you want>`
 - Claude Code: `/build-feature <what you want>`
+- GitHub Copilot CLI: it loads the same skill from `.agents/skills/`; ask it to use the `build-feature` skill. The subagents still run on Codex or Claude, so one of them must be installed.
 
 The chat comes back to you only with questions, with the plan for approval, and with the result.
 

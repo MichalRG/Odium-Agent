@@ -487,15 +487,7 @@ def guided_setup(args) -> int:
             git_out(dst, 'add', '-A')
             commit = git_out(dst, 'commit', '-qm', 'Initial commit')
             print('Created the first commit.' if commit.returncode == 0 else f'Commit failed: {commit.stderr.strip()}')
-    clean = not git_out(dst, 'status', '--porcelain').stdout and not git_out(dst, 'rev-parse', '--verify', '-q', 'HEAD').returncode
-    if interactive and clean and (dst / 'scripts' / 'verify.config.json').exists() and confirm(
-            '\nScaffold the project now with the AI bootstrap agent? It runs an AI agent that executes commands '
-            'on this machine, so use a disposable environment.', False):
-        provider = ask('Provider (claude/codex)? [claude]', 'claude')
-        request = ask('What should it build? [Scaffold the project described in the repository docs]',
-                      'Scaffold the project described in the repository docs')
-        return subprocess.run([sys.executable, 'ai_nest/cli.py', 'bootstrap', '--provider', provider,
-                               '--allow-host-execution', request], cwd=dst).returncode
+    # Setup only: the installer never starts an agent. Features and bootstrap start from the chat.
     return 0
 
 

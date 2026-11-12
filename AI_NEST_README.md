@@ -22,8 +22,9 @@ python /path/to/odium-agent/install.py /your/git/repo --update-code
 - whether to add files of 5 MB or more to `.gitignore` while the repository has no commits;
 - whether to use a local install;
 - which stacks to configure (`NAME[:FOLDER]`), suggesting the ones it detects in the root and first-level folders;
-- whether to make the first commit, showing the Git identity it will use;
-- whether to start `bootstrap`. This one defaults to no, because it runs an AI agent.
+- whether to make the first commit, showing the Git identity it will use.
+
+The installer only sets the Nest up: it copies its files and writes the check configuration. It never starts an agent and never changes project code; features and `bootstrap` start from the chat.
 
 Without a terminal (scripts, CI, agents), it asks nothing and does nothing extra, and a folder without Git stays an error. `--yes` takes the defaults without asking: `git init`, ignore large files, the detected stacks and the first commit. It never starts `bootstrap`. An agent should ask the user first, then call for example `install.py <folder> --local --yes --template python-uv:app`.
 
@@ -126,7 +127,7 @@ git add -A  # review `git diff --cached` before committing
 
 ### Start a feature
 
-The easy way is one chat: Codex `$build-feature <what you want>` or Claude Code `/build-feature <what you want>`. The chat comes back to you only when the nest has questions, when the plan is ready for your approval, and with the result. It uses these two commands, which you can also run yourself:
+The easy way is one chat: Codex `$build-feature <what you want>` or Claude Code `/build-feature <what you want>`. GitHub Copilot CLI loads the same skill from `.agents/skills/`: ask it to use the `build-feature` skill. Its subagents still run on Codex or Claude. The chat comes back to you only when the nest has questions, when the plan is ready for your approval, and with the result. It uses these two commands, which you can also run yourself:
 
 ```bash
 # 1. Scout, specify and plan, then stop. Changes no code.

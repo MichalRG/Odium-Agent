@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "default_timeout_seconds": 900,
+  "required_suites": [
+    "unit"
+  ],
+  "checks": [
+    {
+      "name": "nest-selftests",
+      "suite": "unit",
+      "cwd": ".",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "ai_nest/selftests",
+        "-p",
+        "test_*.py"
+      ]
+    }
+  ]
+}

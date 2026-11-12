@@ -26,6 +26,7 @@ FILES = [
     'scripts/verify.sh',
     'scripts/verify.py',
     'scripts/verify.config.json.example',
+    'ai_nest/templates/ai-nest-verify.yml',
     '.github/workflows/ai-nest-verify.yml',
     'nest.config.json',
     '.claude/settings.json',
@@ -34,6 +35,8 @@ FILES = [
     # Do not inject these tests into the application's own test directories.
     *[f'ai_nest/selftests/{p.name}' for p in SELFTEST_SOURCE.glob('test_*.py')],
 ]
+# The Nest's own repository runs a CI of its own, so the project workflow ships as a template.
+SOURCE_OF = {'.github/workflows/ai-nest-verify.yml': 'ai_nest/templates/ai-nest-verify.yml'}
 BRIDGES = {
     'AGENTS.md': '\n\n## AI Engineering Nest\n\nUse `python ai_nest/cli.py doctor` and the AI Nest workflow documented in `AI_NEST_README.md`. Never bypass gates or modify the AI Nest policy files to make code pass.\n',
     'CLAUDE.md': '\n\n## AI Engineering Nest\n\nRead and follow AGENTS.md. Use the provider-independent CLI in AI_NEST_README.md for enforced verification.\n',
@@ -307,7 +310,7 @@ def install(dst: Path, force: bool = False, update_code: bool = False, local: bo
     updatable = ('ai_nest/', '.agents/skills/', '.claude/skills/')
     updatable_files = {'scripts/verify.sh', 'scripts/verify.py', 'install.py'}
     for name in FILES:
-        source = SOURCE / name
+        source = SOURCE / SOURCE_OF.get(name, name)
         target = dst / name
         if (local or not git) and name == '.github/workflows/ai-nest-verify.yml':
             continue  # CI checkouts cannot see an uncommitted Nest

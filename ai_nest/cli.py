@@ -1559,9 +1559,12 @@ def main() -> int:
         if cmd in ('plan', 'run', 'bootstrap'):
             p.add_argument('--session', default=None,
                            help='Named persistent handoff session, reusable across runs')
-            p.add_argument('feature', nargs='?' if cmd == 'run' else None,
+            p.add_argument('feature', nargs='?',
                            help='What to scaffold so the configured checks can run (greenfield projects)'
                            if cmd == 'bootstrap' else 'Feature request or bug description')
+            # One stable command line, so "always allow python ai_nest/cli.py" approvals keep matching.
+            p.add_argument('--request-file', type=Path, default=None,
+                           help='Read the request from this UTF-8 text file instead of the argument')
         if cmd == 'run':
             p.add_argument('--from-plan', metavar='RUN_ID', default=None,
                            help='Implement the approved plan of this `plan` run (request and session come from it)')
@@ -1581,6 +1584,10 @@ def main() -> int:
                           'repositories) pass the repository folder: --repo <name>.')
         if args.command == 'doctor':
             return doctor(repo, args.provider)
+        if getattr(args, 'request_file', None):
+            if args.feature:
+                raise Blocked('Pass the request as text or with --request-file, not both.')
+            args.feature = args.request_file.read_text(encoding='utf-8').strip()
         if args.command == 'run' and args.from_plan:
             if args.feature or args.session:
                 raise Blocked('--from-plan takes the request and session from the plan run; omit them.')
@@ -1589,7 +1596,8 @@ def main() -> int:
                                approved['session'], approved=approved)
         if args.command in ('plan', 'run', 'bootstrap'):
             if not args.feature:
-                raise Blocked('run needs a feature request or --from-plan RUN_ID')
+                raise Blocked(f'{args.command} needs a request: text, --request-file'
+                              + (' or --from-plan RUN_ID' if args.command == 'run' else ''))
             return run_feature(repo, args.feature, args.provider, args.allow_host_execution, args.session,
                                bootstrap=args.command == 'bootstrap', plan_only=args.command == 'plan')
         if args.command == 'sessions':

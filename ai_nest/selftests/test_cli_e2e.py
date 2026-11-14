@@ -203,6 +203,19 @@ class EndToEndTests(unittest.TestCase):
         self.assertFalse(stages & {'explore', 'specify', 'plan'}, stages)
         self.assertIn('implement', stages)
 
+    def test_long_request_is_read_from_a_file(self):
+        root, env = self.feature_project('happy')
+        request = 'Fix addition\n\nOwner answers:\n1. "Floats?" - no, it\'s $INT only.'
+        (root / '.ai-nest').mkdir(exist_ok=True)
+        (root / '.ai-nest/request.md').write_text(request + '\n', encoding='utf-8')
+        p = self.nest(root, env, 'plan', '--allow-host-execution', '--request-file', '.ai-nest/request.md')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        report = json.loads(next((root / '.ai-nest/runs').glob('*/report.json')).read_text())
+        self.assertEqual(report['request'], request)
+        p = self.nest(root, env, 'plan', '--allow-host-execution', '--request-file', '.ai-nest/request.md', 'Fix addition')
+        self.assertEqual(p.returncode, 1)
+        self.assertIn('not both', p.stderr)
+
     def test_plan_returns_open_questions_instead_of_planning(self):
         root, env = self.feature_project('questions')
         p = self.nest(root, env, 'plan', '--session', 'calc', '--allow-host-execution', 'Fix addition')

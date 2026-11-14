@@ -149,6 +149,10 @@ Build a large request in slices: one plan, approval, run and merge per slice, al
 
 To skip the approval, `run --session <name> --allow-host-execution "<request>"` does both steps in one command and blocks on open questions. Use `--provider claude` for Claude Code agents or `--provider copilot` for GitHub Copilot CLI agents.
 
+A long request (with owner answers, feedback or slice notes) goes in a file: `--request-file .ai-nest/requests/<session>.md` replaces the request argument of `plan`, `run` and `bootstrap`. The file must be in an ignored folder such as `.ai-nest/`, because the source checkout must be clean.
+
+**Permission prompts.** `plan`, `run` and `bootstrap` write Git branches and worktrees in `.git`, and the Codex sandbox blocks that, so in Codex the chat asks to run each Nest command outside the sandbox. The chat always uses the same command form, `python ai_nest/cli.py …`, so you can answer the first prompt with "don't ask again for commands that start with `python ai_nest/cli.py`" and the later runs go through without asking. The chat still asks for the merge (one prompt for the commits and the merge) and for any one-off diagnostic script, which it saves under `.ai-nest/scratch/` so you can read it first.
+
 **Copilot CLI as provider.** Log in once with `copilot login`. Copilot CLI has no option to enforce an output schema, so the orchestrator appends the stage schema to the prompt, reads the last assistant message from `--output-format json` and checks it against the schema itself; an answer that does not match blocks the stage like invalid JSON from the other providers. Read-only stages run with `--deny-tool=write`. Copilot's own `--sandbox` is not used, because it needs host features many containers lack.
 
 ### Workspaces: a folder of several repositories

@@ -504,3 +504,63 @@ class LocalInstallTests(unittest.TestCase):
             (self.repo / 'scripts/verify.config.json').write_text(json.dumps(data))
             listed = command(self.repo, 'bash', 'scripts/verify.sh', '--list')
             self.assertEqual(listed.returncode, 0, path.name + listed.stdout + listed.stderr)
+
+
+class HomeInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.user = Path(self.tmp.name) / 'user'  # stands in for ~, so the real one is never touched
+        self.nest = self.user / '.ai-nest'
+        self.repo = Path(self.tmp.name) / 'app'
+        self.repo.mkdir(parents=True)
+        for args in (('init', '-q'), ('config', 'user.email', 't@example.invalid'), ('config', 'user.name', 't')):
+            command(self.repo, 'git', *args)
+        (self.repo / 'pyproject.toml').write_text('[project]\nname = "app"\n')
+        command(self.repo, 'git', 'add', '-A')
+        command(self.repo, 'git', 'commit', '-qm', 'base')
+
+    def install(self, installer, *args):
+        return command(self.repo, sys.executable, str(installer), '--home', *args,
+                       env={**os.environ, 'HOME': str(self.user)})
+
+    def test_home_install_keeps_every_nest_file_out_of_the_repository(self):
+        before = sorted(p.name for p in self.repo.iterdir())
+        p = self.install(ROOT / 'install.py', str(self.repo))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('Checks: lint, unit', p.stdout)
+        self.assertEqual(sorted(p.name for p in self.repo.iterdir()), before)
+        self.assertEqual(command(self.repo, 'git', 'status', '--porcelain').stdout, '')
+        self.assertIn('/.ai-nest/', (self.repo / '.git/info/exclude').read_text())
+        self.assertEqual(json.loads((self.nest / 'ai_nest/installation.json').read_text())['mode'], 'home')
+        for absent in ('scripts', '.github', 'ai_nest/selftests', 'CLAUDE.md'):
+            self.assertFalse((self.nest / absent).exists(), absent)
+        cfg_path = self.nest / 'projects/app/nest.config.json'
+        entry = json.loads(cfg_path.read_text())['workspace']['repos']['app']
+        self.assertEqual(entry['path'], str(self.repo.resolve()))
+        cli = f'python {self.nest.resolve()}/ai_nest/cli.py'
+        for tool in ('.claude', '.agents'):  # Claude Code; Codex and Copilot
+            for skill in ('build-feature', 'nest-setup'):
+                text = (self.user / tool / 'skills' / skill / 'SKILL.md').read_text()
+                self.assertIn(cli, text, f'{tool} {skill}')
+                self.assertNotIn('~/.ai-nest', text)
+        # The home's own installer registers again and keeps the owner's edits.
+        entry['checks'] = [{'name': 'unit', 'suite': 'unit', 'cwd': '.', 'argv': ['true']}]
+        cfg_path.write_text(json.dumps({'workspace': {'repos': {'app': entry}}}))
+        p = self.install(self.nest / 'install.py', str(self.repo))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(json.loads(cfg_path.read_text())['workspace']['repos']['app']['checks'], entry['checks'])
+        self.assertEqual(sorted(p.name for p in (self.nest / 'projects').iterdir()), ['app'])
+
+    def test_home_install_refuses_what_it_cannot_register(self):
+        (self.repo / 'sub').mkdir()
+        p = self.install(ROOT / 'install.py', str(self.repo / 'sub'))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('not the top folder of a Git repository', p.stderr)
+        (self.repo / 'nest.config.json').write_text('{}')
+        p = self.install(ROOT / 'install.py', str(self.repo))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('has its own Nest install', p.stderr)
+        p = self.install(ROOT / 'install.py', '--local', str(self.repo))
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn('omit --local', p.stderr)

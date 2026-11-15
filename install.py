@@ -507,6 +507,86 @@ STACK_MARKERS = [('angular', ('angular.json',)), ('python-uv', ('uv.lock',)),
 LARGE_FILE_BYTES = 5 * 1024 * 1024
 
 
+# A home install keeps the policy files the owner edits; it replaces the rest on every run.
+HOME_KEEPS = ('nest.config.json', '.claude/settings.json')
+SETUP_SKILLS = ['.agents/skills/nest-setup/SKILL.md', '.claude/skills/nest-setup/SKILL.md']
+
+
+def personal_skill(text: str, home: Path) -> str:
+    """Point a skill at the home install by absolute path, so that "always allow" rules keep matching."""
+    return re.sub(r'(?<![\w/.~-])ai_nest/cli\.py', f'{home}/ai_nest/cli.py', text).replace('~/.ai-nest', str(home))
+
+
+def register_home_project(home: Path, repo: Path, templates: list[tuple[str, str]] | None) -> tuple[Path, list[str]]:
+    """Give the repository a project folder in the home install, with checks found from its stacks."""
+    top = git_out(repo, 'rev-parse', '--show-toplevel')
+    if top.returncode or Path(top.stdout.strip()).resolve() != repo:
+        raise RuntimeError(f'{repo} is not the top folder of a Git repository; register the repository root.')
+    if (repo / 'nest.config.json').is_file():
+        raise RuntimeError(f'{repo} has its own Nest install (nest.config.json), which runs use first. '
+                           'Remove that install to use the home install.')
+    projects = home / 'projects'
+    found = [(c, n) for c in sorted(projects.glob('*/nest.config.json'))
+             for n, e in json.loads(c.read_text(encoding='utf-8')).get('workspace', {}).get('repos', {}).items()
+             if isinstance(e, dict) and e.get('path') == str(repo)]
+    if found:  # registered before: keep the owner's edits
+        path, name = found[0]
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    else:
+        name, i = repo.name, 2
+        while (projects / name).exists():
+            name, i = f'{repo.name}-{i}', i + 1
+        path = projects / name / 'nest.config.json'
+        cfg = {'workspace': {'repos': {name: {'path': str(repo)}}}}
+    entry = cfg['workspace']['repos'][name]
+    if templates or not found:
+        specs = templates or [template_spec(s) for s in detect_stacks(repo)]
+        entry['checks'], entry['setup_commands'], _ = template_checks(specs)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, indent=2) + '\n', encoding='utf-8')
+    # Request files go in .ai-nest/, and build output must not leak into a run's change set; this clone only.
+    write_local_excludes(repo, ['/.ai-nest/', *GENERATED_IGNORES])
+    return path.parent, [c.get('name', '?') for c in entry.get('checks', [])]
+
+
+def install_home(repo: Path | None, templates: list[tuple[str, str]] | None) -> None:
+    """Install or update the Nest in ~/.ai-nest and its personal skills; register a repository, which gets no file."""
+    home = (Path.home() / '.ai-nest').resolve()  # SOURCE is resolved too
+    if SOURCE != home:  # the home's own install.py only registers
+        records, kept = previous_records(home) or {}, []
+        for name in [f for f in FILES if not f.startswith(WORKSPACE_SKIPS)] + ['AGENTS.md', 'AI_NEST_README.md', *SETUP_SKILLS]:
+            target = home / name
+            if name in HOME_KEEPS and target.is_file():
+                kept.append(name)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(SOURCE / name, target)
+            records[name] = {'status': 'installed', 'sha256': sha256_file(target)}
+        write_installation_manifest(home, records, 'home')
+        print(f'AI Nest home install {RELEASE} in {home}' + (f'; kept your {" and ".join(kept)}.' if kept else '.'))
+    (home / 'projects').mkdir(parents=True, exist_ok=True)
+    for tool in ('.claude', '.agents'):  # Claude Code reads ~/.claude/skills; Codex and Copilot ~/.agents/skills
+        for skill in ('build-feature', 'nest-setup'):
+            target = Path.home() / tool / 'skills' / skill / 'SKILL.md'
+            if target.is_file() and 'AI Nest' not in target.read_text(encoding='utf-8', errors='replace'):
+                print(f'WARNING: {target} is not an AI Nest skill; left unchanged.')
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(personal_skill((home / tool / 'skills' / skill / 'SKILL.md').read_text(encoding='utf-8'), home),
+                              encoding='utf-8')
+    print('Skills build-feature and nest-setup: ~/.claude/skills (Claude Code), ~/.agents/skills (Codex, Copilot).')
+    if not repo:
+        print(f'Register a repository: python {home / "install.py"} --home /path/to/repo, or ask the nest-setup skill.')
+        return
+    folder, checks = register_home_project(home, repo, templates)
+    print(f'\nRegistered {repo}. Checks: ' + (', '.join(checks) or 'NONE: add them by hand'))
+    print(f'  Its checks, runs and sessions are in {folder}; edit the checks in {folder / "nest.config.json"}.')
+    print('  The repository gets no file. Only .git/info/exclude, which Git never commits, hides .ai-nest/ and build output.')
+    print(f'Next, from {repo}:')
+    print(f'  python {home}/ai_nest/cli.py doctor --provider codex')
+    print(f'  python {home}/ai_nest/cli.py verify --allow-host-execution  # runs its checks once')
+    print('  then /build-feature <request> in Claude Code, or $build-feature <request> in Codex.')
+
 def git_out(dst: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(['git', *args], cwd=dst, capture_output=True, text=True)
 
@@ -596,7 +676,10 @@ def guided_setup(args) -> int:
 
 def main():
     p = argparse.ArgumentParser(description='Install portable AI Engineering Nest into a Git repo')
-    p.add_argument('repository', type=Path)
+    p.add_argument('repository', type=Path, nargs='?')
+    p.add_argument('--home', action='store_true',
+                   help='Install the Nest once in ~/.ai-nest, with personal skills for Claude Code, Codex and Copilot, '
+                        'or update it; with a repository, also register it. The repository gets no file to commit')
     p.add_argument('--yes', action='store_true',
                    help='Do not prompt: run git init, ignore large files, use detected stacks and make the first commit')
     p.add_argument('--force', action='store_true', help='Replace AI Nest core/config files, also project files at Nest paths, after backing up changed ones '
@@ -610,11 +693,19 @@ def main():
                    help=f'Write scripts/verify.config.json from stack templates ({", ".join(TEMPLATES)}); '
                         'repeat for several stacks, e.g. --template python-uv:app --template angular:frontend')
     args = p.parse_args()
-    if not args.repository.is_dir():
+    if args.home and (args.local or args.force or args.update_code):
+        p.error('--home always updates the home install and never writes into the repository; '
+                'omit --local, --force and --update-code')
+    if not args.home and not args.repository:
+        p.error('give the repository to install into, or --home')
+    if args.repository and not args.repository.is_dir():
         p.error('Directory does not exist')
     try:
+        if args.home:
+            install_home(args.repository.resolve() if args.repository else None, args.template)
+            return 0
         return guided_setup(args)
-    except (RuntimeError, OSError) as ex:
+    except (RuntimeError, OSError, ValueError) as ex:
         print(f'Installation blocked: {ex}', file=sys.stderr)
         return 1
 

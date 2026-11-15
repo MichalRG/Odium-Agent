@@ -15,6 +15,8 @@ python /path/to/odium-agent/install.py /your/git/repo --local --template python
 python /path/to/odium-agent/install.py /your/git/repo --template python
 # Upgrade either kind (repeat --local for a local install):
 python /path/to/odium-agent/install.py /your/git/repo --update-code
+# Home install: the Nest once in ~/.ai-nest, no file in the repository (see Home install):
+python /path/to/odium-agent/install.py --home /your/git/repo
 ```
 
 **Guided setup.** Run in a terminal, the installer asks about everything the flags leave open:
@@ -179,6 +181,30 @@ python ai_nest/cli.py run --repo api --from-plan <run-id> --allow-host-execution
 A run works in one repository: the branch `ai-nest/<run-id>` and its worktrees belong to that repository, and only its checks run. Runs and sessions are stored in the workspace's `.ai-nest/`, so the repository gets nothing but the branch. The agents get the workspace folder and the names of the other repositories as reference material: the read-only stages (explore, specify, plan, reviews) may read them, and Claude and Copilot get the workspace with `--add-dir` for those stages. Writing stages keep their file tools in the worktree. For Codex nothing extra is passed; what it may read outside the worktree is up to its sandbox settings. The target repository's own `AGENTS.md`, when it has one, is added to every prompt.
 
 A feature that spans repositories is one run per repository, with the same `--session`, so that the later runs see the plans and handoffs of the earlier ones.
+
+### Home install: nothing in the repository
+
+The Nest is installed once, in `~/.ai-nest`, and the repositories you register get no file and nothing to commit:
+
+```bash
+python /path/to/odium-agent/install.py --home              # install, or update the Nest and its skills
+python /path/to/odium-agent/install.py --home ~/code/app   # also register a repository
+python ~/.ai-nest/install.py --home ~/code/other           # register more with the home's own copy
+```
+
+- `~/.ai-nest/` holds the code, the prompts, the Nest's `AGENTS.md` and `.claude/settings.json`, and `nest.config.json`: the policy (models, limits, safety) for all projects. An update replaces the code and keeps these two files.
+- Each repository gets a project folder, `~/.ai-nest/projects/<name>/`. Its `nest.config.json` holds `workspace.repos.<name>` with the repository's `path`, its `checks` and `setup_commands`, found from its stacks like in a workspace (`--template` chooses them; registering again keeps your edits). A top-level section in this file, for example `limits`, replaces the policy's section for this project. Its `.ai-nest/` holds the runs, worktrees and sessions.
+- The repository's `.git/info/exclude`, which Git never commits, gets a block that hides `.ai-nest/` (the chat's request files) and build output. No `.gitignore`, `AGENTS.md`, `CLAUDE.md`, skill or CI file is added.
+- The installer writes the skills for you, not for a project: `build-feature` and `nest-setup` in `~/.claude/skills/` (Claude Code) and `~/.agents/skills/` (Codex and Copilot). They call the Nest by its absolute path, so one "don't ask again" answer in Codex covers every later Nest command. `nest-setup` installs or updates the Nest, registers a repository and goes through its checks with you; use it in a new project or when `doctor` says that the repository is not registered.
+
+Run the commands from the repository root, without `--repo`:
+
+```bash
+python ~/.ai-nest/ai_nest/cli.py doctor --provider codex
+python ~/.ai-nest/ai_nest/cli.py verify --allow-host-execution  # runs its checks once
+```
+
+Limits: the Nest and the check configuration exist only on your machine, so teammates and CI do not get them; use the committed install for a team. A repository with its own install (`nest.config.json` in its root) keeps using it, and the installer refuses to register it. Claude stages get the Nest's `.claude/settings.json` with `--settings`, because the worktree has none.
 
 ### Start from an empty project (`bootstrap`)
 

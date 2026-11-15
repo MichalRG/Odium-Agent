@@ -593,6 +593,24 @@ class NestTests(unittest.TestCase):
         self.assertNotIn('--add-dir', write_argv)
         self.assertIn('Keep handlers thin.', prompt)  # the target repository's own rules
 
+    def test_claude_stages_get_the_nest_rules_when_the_worktree_has_none(self):
+        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': []}
+        calls = []
+        def fake_call(argv, cwd, timeout, input_text=None, **watch):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'structured_output': answer}), '')
+        with tempfile.TemporaryDirectory() as tmp, patch('builtins.print'), \
+                patch.object(nest.shutil, 'which', return_value='/usr/bin/claude'), \
+                patch.object(nest, 'call', side_effect=fake_call):
+            agent = nest.CLIProvider('claude', {}, Path(tmp))
+            agent.run('explore', Path(tmp), {})  # a workspace or home repository: no Nest files
+            (Path(tmp) / '.claude').mkdir()
+            (Path(tmp) / '.claude/settings.json').write_text('{}')
+            agent.run('explore', Path(tmp), {})  # its own committed rules load as project settings
+        bare, own = [c for c in calls if c[0] == 'claude']
+        self.assertEqual(bare[bare.index('--settings') + 1], str(nest.ROOT / '.claude/settings.json'))
+        self.assertNotIn('--settings', own)
+
     def test_extra_observations_keep_the_most_severe_instead_of_blocking(self):
         def obs(severity, n):
             return {'kind': 'fact', 'severity': severity, 'summary': f'{severity}{n}', 'evidence': 'e',

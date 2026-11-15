@@ -50,6 +50,8 @@ python /path/to/odium-agent/install.py /your/git/repo --local --template python
 
 The installer only copies the Nest's files and writes the check configuration. It never starts an agent.
 
+To keep every Nest file out of your repositories, install it once in `~/.ai-nest` with `install.py --home /your/git/repo`: the repository gets no file to commit, and the `build-feature` and `nest-setup` skills are installed for you in Claude Code, Codex and Copilot. See [Home install](AI_NEST_README.md#home-install-nothing-in-the-repository).
+
 For a folder of several repositories (for example the repositories of one product), install into the folder itself: it becomes a workspace, where each run works in one repository and verifies with that repository's own checks. See [Workspaces](AI_NEST_README.md#workspaces-a-folder-of-several-repositories).
 
 Then, in the project, start a chat and describe the feature:

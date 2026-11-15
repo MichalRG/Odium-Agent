@@ -398,6 +398,61 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn('"notes"', text)
         self.assertIn('Keep calc functions pure.', text)
 
+    def test_home_install_runs_with_no_nest_file_in_the_repository(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        user, calc = Path(handle.name) / 'user', Path(handle.name) / 'calc'
+        calc.mkdir()
+        for argv in (('init', '-q'), ('config', 'user.email', 't@example.invalid'), ('config', 'user.name', 'T')):
+            cmd(calc, 'git', *argv)
+        (calc / 'calc.py').write_text('def add(a,b):\n    return 0\n')
+        (calc / 'AGENTS.md').write_text('Keep calc functions pure.\n')
+        (calc / 'tests').mkdir()
+        (calc / 'tests/test_existing.py').write_text(
+            'import unittest\nfrom calc import add\nclass TestExisting(unittest.TestCase):\n'
+            '    def test_zero(self):\n        self.assertEqual(add(0,0),0)\n')
+        cmd(calc, 'git', 'add', '-A')
+        self.assertEqual(cmd(calc, 'git', 'commit', '-qm', 'base').returncode, 0)
+        bin_path = Path(handle.name) / 'bin'
+        bin_path.mkdir()
+        (bin_path / 'codex').write_text(FAKE.replace('PYTHON', sys.executable, 1))
+        (bin_path / 'codex').chmod(0o755)
+        prompts = Path(handle.name) / 'prompts.txt'
+        env = {**os.environ, 'HOME': str(user), 'PATH': str(bin_path) + os.pathsep + os.environ['PATH'],
+               'NEST_FAKE_SCENARIO': 'happy', 'NEST_FAKE_PROMPTS': str(prompts)}
+        p = cmd(calc, sys.executable, str(ROOT / 'install.py'), '--home', str(calc), env=env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        nest = (user / '.ai-nest').resolve()
+        project = nest / 'projects/calc'
+        cfg = json.loads((project / 'nest.config.json').read_text())
+        cfg['workspace']['repos']['calc']['checks'] = [
+            {'name': 'lint', 'suite': 'static', 'cwd': '.', 'argv': [sys.executable, '-c', 'print("lint ok")']},
+            {'name': 'unit', 'suite': 'unit', 'cwd': '.',
+             'argv': [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-v']}]
+        # A project's own section replaces the home's.
+        cfg['limits'] = {**json.loads((nest / 'nest.config.json').read_text())['limits'], 'max_repair_attempts': 1}
+        (project / 'nest.config.json').write_text(json.dumps(cfg))
+        cli = str(nest / 'ai_nest/cli.py')
+        p = cmd(calc, sys.executable, cli, 'plan', '--session', 'calc', '--allow-host-execution', 'Fix addition', env=env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('run --from-plan', p.stdout)
+        self.assertNotIn('--repo', p.stdout)
+        runs = project / '.ai-nest/runs'
+        plan_id = next(runs.iterdir()).name
+        p = cmd(calc, sys.executable, cli, 'run', '--from-plan', plan_id, '--allow-host-execution', env=env)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        report = json.loads(next(d for d in runs.iterdir() if d.name != plan_id).joinpath('report.json').read_text())
+        self.assertEqual(report['status'], 'verified')
+        self.assertIn('a+b', (Path(report['worktree']) / 'calc.py').read_text())
+        self.assertNotEqual(cmd(calc, 'git', 'branch', '--list', report['branch']).stdout, '')
+        # The repository gets its branch and nothing else: no Nest file, no change for Git to see.
+        self.assertEqual(sorted(p.name for p in calc.iterdir()), ['.git', 'AGENTS.md', 'calc.py', 'tests'])
+        self.assertEqual(cmd(calc, 'git', 'status', '--porcelain').stdout, '')
+        self.assertEqual([d.name.split('-')[0] for d in (project / '.ai-nest/sessions').iterdir()], ['calc'])
+        text = prompts.read_text()
+        self.assertIn('Keep calc functions pure.', text)
+        self.assertNotIn('other_repositories', text)
+
     def run_scenario(self, scenario, local=False):
         root, env = self.feature_project(scenario, local)
         p = cmd(root, sys.executable, 'ai_nest/cli.py', 'run', '--provider', 'codex',

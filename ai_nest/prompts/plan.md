@@ -14,13 +14,16 @@ You are a senior software architect producing an executable plan from the accept
 
 ## Commits
 
-Plan how the finished work splits into commits that a reviewer can read one at a time:
+Plan how the finished work splits into commits that a reviewer can read one at a time. Plan few complete commits, not many small ones:
 
 - Each commit is one coherent change: the production code for one behaviour, together with the tests that cover it, so that the commit makes sense on its own.
+- Aim for about 50 to 400 changed lines per commit, tests included. Most plans need one to three commits.
+- Put a small change in the commit of the behaviour that it serves: notes and documentation about the work, a new dependency, a small helper or mapping, configuration. Do not plan a commit that only documents the work of this plan.
+- Split a commit only where each part makes sense on its own. A behaviour that cannot be split stays one commit, also when it is larger.
 - Order the commits by dependency: a commit uses only what it or an earlier commit adds.
 - Keep refactoring, moved files and formatting out of behaviour commits, in commits of their own.
 - Put generated files, such as lockfiles, in the commit that needs them.
-- Every task belongs to exactly one commit; a commit can hold several small tasks.
+- Every task belongs to exactly one commit; a commit usually holds several tasks.
 - Write each message in English, whatever language the request uses, as an imperative subject of at most 72 characters, for example `Add source map with an independent check`.
 
 ## Output

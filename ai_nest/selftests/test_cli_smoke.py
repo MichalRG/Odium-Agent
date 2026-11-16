@@ -63,7 +63,8 @@ base = Path.cwd()
 notes = [{'kind':'fact','severity':'info','summary':'observed',
           'evidence':'calc.py','file':'calc.py','suggested_action':'none'}]
 if '# Role: explorer' in prompt:
-    payload={'summary':'repo mapping','relevant_files':['calc.py'],'risks':[]}
+    payload={'summary':'repo mapping','relevant_files':['calc.py'],'risks':[],
+             'context_pack':{'outline':'', 'excerpts':[]}}
 elif '# Role: specification writer' in prompt:
     payload={'goal':'fix addition','acceptance_criteria':['add(1,2) == 3'],
              'constraints':[],'open_questions':[]}

@@ -121,7 +121,8 @@ class NestTests(unittest.TestCase):
                 payload.append((argv, input_text))
                 final_index = argv.index('--output-last-message') + 1
                 Path(argv[final_index]).write_text(json.dumps({
-                    'summary':'ok','relevant_files':[],'risks':[],'observations':[]}))
+                    'summary':'ok','relevant_files':[],'risks':[],'observations':[],
+                    'context_pack': {'outline': '', 'excerpts': []}}))
                 return subprocess.CompletedProcess(argv, 0, '', '')
             with patch.object(nest.shutil, 'which', return_value='/usr/bin/codex'), patch.object(nest, 'call', side_effect=fake_call):
                 agent = nest.CLIProvider('codex', cfg, Path(tmp))
@@ -348,7 +349,7 @@ class NestTests(unittest.TestCase):
                             'file': 'calc.py', 'suggested_action': 'Check arithmetic'}
                     if stage == 'explore':
                         return {'summary': 'calc.add returns zero', 'relevant_files': ['calc.py'], 'risks': [],
-                                'observations': [note]}
+                                'observations': [note], 'context_pack': {'outline': '', 'excerpts': []}}
                     if stage == 'specify':
                         return {'goal': 'add correctly', 'acceptance_criteria': ['add(1,2)==3'],
                                 'constraints': [], 'open_questions': [], 'observations': [note]}
@@ -457,7 +458,7 @@ class NestTests(unittest.TestCase):
             self.assertIn('sessions/<session-slug>', (repo / 'AI_NEST_README.md').read_text())
 
     def test_reject_malformed_observations(self):
-        result = {'summary': 'test', 'relevant_files': [], 'risks': [],
+        result = {'summary': 'test', 'relevant_files': [], 'risks': [], 'context_pack': {'outline': '', 'excerpts': []},
                   'observations': [{'kind': 'risk'}]}
         with self.assertRaisesRegex(nest.Blocked, 'invalid observation'):
             nest.parse_result('explore', result)
@@ -508,7 +509,7 @@ class NestTests(unittest.TestCase):
                     nest.CLIProvider('codex', {'models': {'codex': bad}}, Path('.'))
 
     def test_copilot_provider_puts_the_schema_in_the_prompt_and_reads_the_last_answer(self):
-        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': []}
+        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': [], 'context_pack': {'outline': '', 'excerpts': []}}
         events = [{'type': 'assistant.message', 'data': {'content': 'Looking around first.'}},
                   {'type': 'assistant.message', 'data': {'content': 'Done.\n```json\n' + json.dumps(answer) + '\n```'}},
                   {'type': 'result', 'exitCode': 0}]
@@ -574,7 +575,7 @@ class NestTests(unittest.TestCase):
         self.assertNotIn('TS2305', log)  # the type checker's expected RED
 
     def test_workspace_read_only_stages_may_read_the_other_repositories(self):
-        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': []}
+        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': [], 'context_pack': {'outline': '', 'excerpts': []}}
         calls = []
         def fake_call(argv, cwd, timeout, input_text=None, **watch):
             calls.append((argv, input_text))
@@ -594,7 +595,7 @@ class NestTests(unittest.TestCase):
         self.assertIn('Keep handlers thin.', prompt)  # the target repository's own rules
 
     def test_claude_stages_get_the_nest_rules_when_the_worktree_has_none(self):
-        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': []}
+        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': [], 'context_pack': {'outline': '', 'excerpts': []}}
         calls = []
         def fake_call(argv, cwd, timeout, input_text=None, **watch):
             calls.append(argv)
@@ -611,12 +612,53 @@ class NestTests(unittest.TestCase):
         self.assertEqual(bare[bare.index('--settings') + 1], str(nest.ROOT / '.claude/settings.json'))
         self.assertNotIn('--settings', own)
 
+    def test_claude_explorer_may_read_the_reference_docs_folder(self):
+        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': [], 'context_pack': {'outline': '', 'excerpts': []}}
+        calls = []
+        def fake_call(argv, cwd, timeout, input_text=None, **watch):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'structured_output': answer}), '')
+        with tempfile.TemporaryDirectory() as tmp, patch('builtins.print'), \
+                patch.object(nest.shutil, 'which', return_value='/usr/bin/claude'), \
+                patch.object(nest, 'call', side_effect=fake_call):
+            agent = nest.CLIProvider('claude', {}, Path(tmp))
+            agent.run('explore', Path(tmp), {'reference_docs': {'folder': '/owner/docs', 'files': ['a.md']}})
+            agent.run('explore', Path(tmp), {})
+        with_docs, without = calls
+        self.assertEqual(with_docs[with_docs.index('--add-dir') + 1], '/owner/docs')
+        self.assertNotIn('--add-dir', without)
+
+    def test_context_pack_copies_only_tracked_code_within_its_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            git(tree, 'init', '-q')
+            (tree / 'big.py').write_text(''.join(f'line {n}\n' for n in range(1, 1001)))
+            (tree / '.env').write_text('TOKEN=tracked-secret\n')
+            (tree / 'local.properties').write_text('sdk.dir=/untracked\n')
+            git(tree, 'add', 'big.py', '.env')
+            def excerpt(file, start, end, why='w'):
+                return {'file': file, 'start_line': start, 'end_line': end, 'why': why}
+            pack = nest.build_context_pack(tree, {'outline': 'Flow: a -> b.', 'excerpts': [
+                excerpt('.env', 1, 1), excerpt('local.properties', 1, 1), excerpt('../x.py', 1, 1),
+                excerpt('', 1, 1), excerpt('big.py', 9, 3), excerpt('big.py', 5, 2000, 'all of it'),
+                excerpt('big.py', 1, 3, 'header')]}, 'a' * 40)
+        self.assertTrue(pack.startswith('# Context pack (base commit aaaaaaaaaaaa)\n\nFlow: a -> b.'))
+        for name in ('.env', 'local.properties', '../x.py'):
+            self.assertIn(f'## {name}: not included', pack)
+        self.assertNotIn('tracked-secret', pack)
+        self.assertNotIn('/untracked', pack)
+        self.assertIn('## big.py:9-3: not included (no such lines)', pack)
+        self.assertIn('## big.py:5-604 - all of it\n```\nline 5\n', pack)  # the 600-line budget
+        self.assertIn('line 604\n```', pack)
+        self.assertNotIn('line 605', pack)
+        self.assertIn('## big.py:1-3 - header (not included: the pack is full', pack)
+
     def test_extra_observations_keep_the_most_severe_instead_of_blocking(self):
         def obs(severity, n):
             return {'kind': 'fact', 'severity': severity, 'summary': f'{severity}{n}', 'evidence': 'e',
                     'file': '', 'suggested_action': ''}
         listed = [obs('info', n) for n in range(16)] + [obs('high', 0), obs('critical', 0)]
-        kept = nest.parse_result('explore', {'summary': 's', 'relevant_files': [], 'risks': [],
+        kept = nest.parse_result('explore', {'summary': 's', 'relevant_files': [], 'risks': [], 'context_pack': {'outline': '', 'excerpts': []},
                                              'observations': listed})['observations']
         self.assertEqual(len(kept), 16)
         self.assertEqual([o['summary'] for o in kept[:3]], ['critical0', 'high0', 'info0'])

@@ -148,8 +148,9 @@ def configure_workspace(dst: Path) -> list[str]:
     cfg.setdefault('tdd', {})['red_commands'] = []
     lines = []
     for name in nested_repositories(dst):
-        # Build output must not leak into a run's change set; the block stays in this clone only.
-        write_local_excludes(dst / name, GENERATED_IGNORES)
+        # Build output must not leak into a run's change set, and .ai-nest/ holds the owner's docs and the
+        # context packs; the block stays in this clone only.
+        write_local_excludes(dst / name, ['/.ai-nest/', *GENERATED_IGNORES])
         if name not in repos:
             checks, setup, _ = template_checks([template_spec(s) for s in detect_stacks(dst / name)])
             repos[name] = {'checks': checks, 'setup_commands': setup}

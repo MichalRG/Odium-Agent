@@ -29,7 +29,10 @@ if os.environ.get('NEST_FAKE_PROMPTS'):
         prompt_log.write(prompt)
 notes = []
 if '# Role: explorer' in prompt:
-    result = {'summary':'explored', 'relevant_files':['calc.py'], 'risks':[]}
+    result = {'summary':'explored', 'relevant_files':['calc.py'], 'risks':[],
+              'context_pack':{'outline':'calc.add adds two numbers.',
+                              'excerpts':[{'file':'calc.py','start_line':1,'end_line':2,'why':'add is wrong'},
+                                          {'file':'../outside.py','start_line':1,'end_line':1,'why':'escape'}]}}
 elif '# Role: specification writer' in prompt:
     result = {'goal':'correct add','acceptance_criteria':['add(1,2)==3'], 'constraints':[],
               'open_questions':['Should add accept floats?'] if scenario == 'questions' else []}
@@ -387,8 +390,9 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(report['status'], 'verified')
         self.assertIn('a+b', (Path(report['worktree']) / 'calc.py').read_text())
         self.assertNotEqual(cmd(calc, 'git', 'branch', '--list', report['branch']).stdout, '')
-        # Runs and sessions live in the workspace; the repository gets only its branch and worktree.
-        self.assertFalse((calc / '.ai-nest').exists())
+        # Runs and sessions live in the workspace; the repository gets its branch, its worktree and, in its
+        # ignored .ai-nest/, the session's context pack.
+        self.assertEqual(sorted(p.name for p in (calc / '.ai-nest').iterdir()), ['context'])
         self.assertEqual(cmd(calc, 'git', 'status', '--porcelain').stdout, '')
         self.assertTrue((workspace / '.ai-nest/sessions').is_dir())
         verification = json.loads(Path(report['verification']).read_text())
@@ -433,6 +437,13 @@ class EndToEndTests(unittest.TestCase):
         cfg['limits'] = {**json.loads((nest / 'nest.config.json').read_text())['limits'], 'max_repair_attempts': 1}
         (project / 'nest.config.json').write_text(json.dumps(cfg))
         cli = str(nest / 'ai_nest/cli.py')
+        self.assertIn('Reference docs for the explorer: none', cmd(calc, sys.executable, cli, 'doctor', env=env).stdout)
+        docs = calc.resolve() / '.ai-nest/docs'  # hidden from Git by the registration's exclude block
+        docs.mkdir(parents=True)
+        (docs / 'architecture.md').write_text('Calc keeps its functions in calc.py.\n')
+        (docs / '.DS_Store').write_text('')
+        self.assertIn(f'Reference docs for the explorer: {docs}, 1 file(s)',
+                      cmd(calc, sys.executable, cli, 'doctor', env=env).stdout)
         p = cmd(calc, sys.executable, cli, 'plan', '--session', 'calc', '--allow-host-execution', 'Fix addition', env=env)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn('run --from-plan', p.stdout)
@@ -445,13 +456,27 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(report['status'], 'verified')
         self.assertIn('a+b', (Path(report['worktree']) / 'calc.py').read_text())
         self.assertNotEqual(cmd(calc, 'git', 'branch', '--list', report['branch']).stdout, '')
-        # The repository gets its branch and nothing else: no Nest file, no change for Git to see.
-        self.assertEqual(sorted(p.name for p in calc.iterdir()), ['.git', 'AGENTS.md', 'calc.py', 'tests'])
+        # The repository gets its branch and its ignored .ai-nest/ (docs, context pack), no change for Git to see.
+        self.assertEqual(sorted(p.name for p in calc.iterdir()), ['.ai-nest', '.git', 'AGENTS.md', 'calc.py', 'tests'])
         self.assertEqual(cmd(calc, 'git', 'status', '--porcelain').stdout, '')
+        packs = list((calc.resolve() / '.ai-nest/context').glob('calc-*.md'))
+        self.assertEqual([str(f) for f in packs], [report['context_pack']])
         self.assertEqual([d.name.split('-')[0] for d in (project / '.ai-nest/sessions').iterdir()], ['calc'])
         text = prompts.read_text()
         self.assertIn('Keep calc functions pure.', text)
         self.assertNotIn('other_repositories', text)
+        # The explorer alone gets the project's documents; hidden files are left out.
+        self.assertEqual(text.count('"reference_docs"'), 1)
+        self.assertIn(f'"folder": "{docs}"', text)
+        self.assertIn('"architecture.md"', text)
+        self.assertNotIn('.DS_Store', text)
+        # Every later stage, also in the approved run, gets the pack with the code cut from the base commit.
+        pack = packs[0].read_text()
+        self.assertIn('calc.add adds two numbers.', pack)
+        self.assertIn('## calc.py:1-2 - add is wrong\n```\ndef add(a,b):\n    return 0\n```', pack)
+        self.assertIn('## ../outside.py: not included', pack)
+        self.assertGreaterEqual(text.count('CONTEXT PACK (untrusted'), 5)  # specify, plan, tests, implement, review
+        self.assertNotIn('"context_pack": "', text)  # as text after the JSON, not inside it
 
     def run_scenario(self, scenario, local=False):
         root, env = self.feature_project(scenario, local)

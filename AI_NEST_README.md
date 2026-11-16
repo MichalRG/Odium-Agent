@@ -194,7 +194,7 @@ python ~/.ai-nest/install.py --home ~/code/other           # register more with 
 
 - `~/.ai-nest/` holds the code, the prompts, the Nest's `AGENTS.md` and `.claude/settings.json`, and `nest.config.json`: the policy (models, limits, safety) for all projects. An update replaces the code and keeps these two files.
 - Each repository gets a project folder, `~/.ai-nest/projects/<name>/`. Its `nest.config.json` holds `workspace.repos.<name>` with the repository's `path`, its `checks` and `setup_commands`, found from its stacks like in a workspace (`--template` chooses them; registering again keeps your edits). A top-level section in this file, for example `limits`, replaces the policy's section for this project. Its `.ai-nest/` holds the runs, worktrees and sessions.
-- The repository's `.git/info/exclude`, which Git never commits, gets a block that hides `.ai-nest/` (the chat's request files) and build output. No `.gitignore`, `AGENTS.md`, `CLAUDE.md`, skill or CI file is added.
+- The repository's `.git/info/exclude`, which Git never commits, gets a block that hides `.ai-nest/` (request files, reference docs and context packs) and build output. No `.gitignore`, `AGENTS.md`, `CLAUDE.md`, skill or CI file is added.
 - The installer writes the skills for you, not for a project: `build-feature` and `nest-setup` in `~/.claude/skills/` (Claude Code) and `~/.agents/skills/` (Codex and Copilot). They call the Nest by its absolute path, so one "don't ask again" answer in Codex covers every later Nest command. `nest-setup` installs or updates the Nest, registers a repository and goes through its checks with you; use it in a new project or when `doctor` says that the repository is not registered.
 
 Run the commands from the repository root, without `--repo`:
@@ -205,6 +205,13 @@ python ~/.ai-nest/ai_nest/cli.py verify --allow-host-execution  # runs its check
 ```
 
 Limits: the Nest and the check configuration exist only on your machine, so teammates and CI do not get them; use the committed install for a team. A repository with its own install (`nest.config.json` in its root) keeps using it, and the installer refuses to register it. Claude stages get the Nest's `.claude/settings.json` with `--settings`, because the worktree has none.
+
+### Reference docs and the context pack
+
+The repository's `.ai-nest/` folder, which Git ignores in every install mode, holds what stays on your machine: the chat's request files, your reference documents and the context packs.
+
+- **Reference docs.** Put documents about the project that are not in Git (architecture, domain, decisions, notes) in `<repository>/.ai-nest/docs/`. The explorer gets the list of files, reads the ones that concern the request first and checks them against the code. Without them, it investigates the repository on its own. `doctor` shows the folder and its file count.
+- **Context pack.** The explorer returns an outline of the affected code (for example the states and transitions of a state machine, with the touched ones marked) and the line ranges that the change touches or depends on. The orchestrator copies those lines from the base commit, in the explorer's order and up to 600 lines, into `<repository>/.ai-nest/context/<session>.md` and the run's `artifacts/context_pack.md`. Every later stage (specification, plan, tests, coder, reviewers) gets the pack in its prompt and reads other files only when the pack does not answer its question. An approved plan keeps its pack for `run --from-plan`. The pack copies only files that Git tracks, never `.env*` or `secrets/` files. Its code shows the base commit, so the stages read the current file before they change or judge it.
 
 ### Start from an empty project (`bootstrap`)
 

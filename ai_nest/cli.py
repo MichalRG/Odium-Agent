@@ -47,7 +47,7 @@ _VERDICT = {'approved': {'type': 'boolean'},
             'findings': _list_of(_obj({'severity': {'type': 'string', 'enum': ['critical', 'high', 'medium', 'low']},
                                        'file': _STRING, 'problem': _STRING, 'evidence': _STRING})),
             'summary': _STRING}
-_OBSERVATION = _obj({'kind': {'type': 'string', 'enum': ['fact', 'decision', 'risk', 'potential_issue', 'todo']},
+_OBSERVATION = _obj({'kind': {'type': 'string', 'enum': ['fact', 'decision', 'risk', 'potential_issue', 'todo', 'gotcha']},
                      'severity': {'type': 'string', 'enum': ['info', 'low', 'medium', 'high', 'critical']},
                      'summary': _STRING, 'evidence': _STRING, 'file': _STRING, 'suggested_action': _STRING})
 _INTEGER = {'type': 'integer'}
@@ -1175,7 +1175,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
     artifacts = run_root / 'artifacts'
     artifacts.mkdir(parents=True)
     base_commit = git(repo, 'rev-parse', 'HEAD')
-    session = SessionStore(nest_home(repo), session_name or run_id, run_id, base_commit)
+    session = SessionStore(nest_home(repo), session_name or run_id, run_id, base_commit, project=repo.name)
     summary: dict = {'run_id': run_id, 'started': now(), 'status': 'running', 'repository': str(repo),
                      'request': request, 'provider': provider_name, 'base_commit': base_commit,
                      'session': session.name, 'session_id': session.slug,

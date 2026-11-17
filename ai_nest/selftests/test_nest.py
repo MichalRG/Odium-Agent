@@ -437,6 +437,22 @@ class NestTests(unittest.TestCase):
             self.assertEqual(len(history), 1)
             self.assertFalse(history[0]['same_base_commit'])
 
+    def test_gotchas_reach_later_sessions_of_the_same_repository_only(self):
+        from memory import SessionStore
+        trap = {'kind': 'gotcha', 'severity': 'info', 'summary': 'Tests need TZ=UTC', 'evidence': 'test_dates.py',
+                'file': 'test_dates.py', 'suggested_action': 'Set TZ'}
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            a = SessionStore(home, 'api', '20261108-120000-abc', 'sha1', project='calc')
+            a.record('implement', {'summary': 's', 'observations': [trap, {**trap, 'kind': 'fact', 'summary': 'x'}]})
+            a.record('protected_tests', {'summary': 's', 'observations': [{**trap, 'summary': 'hidden case'}]})
+            b = SessionStore(home, 'other-feature', '20261108-120001-def', 'sha2', project='calc')
+            b.record('review', {'summary': 's', 'findings': [], 'observations': [{**trap, 'summary': ' tests need  tz=utc'}]})
+            later = SessionStore(home, 'third', '20261108-120002-ghi', 'sha3', project='calc').handoff_context('explore')
+            self.assertEqual([(g['summary'], g['seen']) for g in later['project_gotchas']], [(' tests need  tz=utc', 2)])
+            elsewhere = SessionStore(home, 'third', '20261108-120003-jkl', 'sha3', project='web')
+            self.assertEqual(elsewhere.handoff_context('implement')['project_gotchas'], [])
+
     def test_upgrade_preserves_configuration_and_existing_instructions(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location('nest_installer', nest.ROOT / 'install.py')

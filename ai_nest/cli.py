@@ -80,6 +80,17 @@ class Unrepairable(Blocked):
     """A block that another coding attempt cannot fix."""
 
 
+class ProviderUnreachable(Blocked):
+    """The provider CLI stopped because it lost the API connection or the API was overloaded."""
+
+
+# How the Claude, Codex and Copilot CLIs report a lost connection or an overloaded API.
+TRANSIENT_PROVIDER_ERROR = re.compile(
+    r'connection_failed|ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|socket hang up|reach the API server|'
+    r'stream disconnected|error sending request|overloaded|Service Unavailable|Bad Gateway', re.I)
+PROVIDER_RETRY_WAITS = (30, 120)  # seconds before the second and the third try
+
+
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
 
@@ -770,6 +781,18 @@ class CLIProvider:
         return [*(['--model', model] if model else []), *([effort_flag, effort] if effort else [])]
 
     def run(self, stage: str, cwd: Path, task: dict, write: bool = False) -> dict:
+        for wait in (*PROVIDER_RETRY_WAITS, None):
+            try:
+                return self._run_once(stage, cwd, task, write)
+            except ProviderUnreachable as ex:
+                if wait is None:
+                    raise
+                # A stage that writes continues from the files that the failed try left.
+                print(f'[AI Nest] {stage}: {ex}; trying again in {wait}s', flush=True)
+                time.sleep(wait)
+        raise AssertionError('unreachable')
+
+    def _run_once(self, stage: str, cwd: Path, task: dict, write: bool) -> dict:
         if stage not in SCHEMAS:
             raise Blocked(f'Unknown stage: {stage}')
         role = (ROOT / 'ai_nest' / 'prompts' / f'{stage}.md').read_text(encoding='utf-8')
@@ -848,7 +871,11 @@ class CLIProvider:
         stdout_log.write_text(p.stdout[-150000:], encoding='utf-8')
         stderr_log.write_text(p.stderr[-150000:], encoding='utf-8')
         if p.returncode != 0:
-            raise Blocked(f'{stage} {self.name} exit {p.returncode}; inspect {stderr_log} and {stdout_log}')
+            # Only the end of the output: the start can hold the agent's own command output.
+            lost = TRANSIENT_PROVIDER_ERROR.search(p.stdout[-3000:] + p.stderr[-3000:])
+            raise (ProviderUnreachable if lost else Blocked)(
+                f'{stage} {self.name} exit {p.returncode}{f" ({lost.group(0)})" if lost else ""}; '
+                f'inspect {stderr_log} and {stdout_log}')
         try:
             envelope = json.loads(raw) if raw.strip() else None
             result = envelope if self.name != 'claude' else envelope.get('structured_output') if isinstance(envelope, dict) else None

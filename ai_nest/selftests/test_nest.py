@@ -644,6 +644,31 @@ class NestTests(unittest.TestCase):
         self.assertEqual(with_docs[with_docs.index('--add-dir') + 1], '/owner/docs')
         self.assertNotIn('--add-dir', without)
 
+    def test_provider_retries_a_lost_connection_but_not_a_real_failure(self):
+        answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': [], 'context_pack': {'outline': '', 'excerpts': []}}
+        lost = json.dumps({'is_error': True, 'api_error': 'connection_failed',
+                           'result': "API Error: Can't reach the API server (ENOTFOUND)"})
+        def provider(outputs):
+            replies = iter(outputs)
+            return lambda argv, cwd, timeout, input_text=None, **watch: subprocess.CompletedProcess(argv, *next(replies))
+        with tempfile.TemporaryDirectory() as tmp, patch('builtins.print'), patch.object(nest.time, 'sleep') as slept, \
+                patch.object(nest.shutil, 'which', return_value='/usr/bin/claude'):
+            agent = nest.CLIProvider('claude', {}, Path(tmp))
+            with patch.object(nest, 'call', side_effect=provider([(1, lost, ''), (1, '', 'socket hang up'),
+                                                                  (0, json.dumps({'structured_output': answer}), '')])):
+                self.assertEqual(agent.run('explore', Path(tmp), {})['summary'], 'ok')
+            self.assertEqual([c.args[0] for c in slept.call_args_list], list(nest.PROVIDER_RETRY_WAITS))
+            self.assertEqual(len(list(Path(tmp).glob('explore_*.stderr.log'))), 3, 'every try keeps its logs')
+            with patch.object(nest, 'call', side_effect=provider([(1, lost, '')] * 3)):
+                with self.assertRaisesRegex(nest.ProviderUnreachable, 'connection_failed'):
+                    agent.run('explore', Path(tmp), {})
+            slept.reset_mock()
+            with patch.object(nest, 'call', side_effect=provider([(1, 'ECONNRESET in an early test run' + 'x' * 4000, 'bad flag')])):
+                with self.assertRaises(nest.Blocked) as caught:
+                    agent.run('explore', Path(tmp), {})
+            self.assertNotIsInstance(caught.exception, nest.ProviderUnreachable)
+            slept.assert_not_called()
+
     def test_context_pack_copies_only_tracked_code_within_its_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
             tree = Path(tmp)

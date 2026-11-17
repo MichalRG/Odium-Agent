@@ -52,6 +52,7 @@ class SessionStore:
         'repair': ('explore', 'specify', 'plan', 'implement', 'repair', 'bootstrap'),
         'review': ('explore', 'specify', 'plan', 'tests', 'implement', 'repair', 'bootstrap', 'review'),
         'security_review': ('explore', 'specify', 'plan', 'implement', 'repair', 'bootstrap', 'review', 'security_review'),
+        'browser': ('browser',),  # it judges the running app, like a user, without the code's history
     }
 
     GOTCHA_LIMIT = 40

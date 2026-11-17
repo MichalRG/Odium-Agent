@@ -210,6 +210,20 @@ python ~/.ai-nest/ai_nest/cli.py verify --allow-host-execution  # runs its check
 
 Limits: the Nest and the check configuration exist only on your machine, so teammates and CI do not get them; use the committed install for a team. A repository with its own install (`nest.config.json` in its root) keeps using it, and the installer refuses to register it. Claude stages get the Nest's `.claude/settings.json` with `--settings`, because the worktree has none.
 
+### Browser checks
+
+Unit tests cannot see a canvas, a layout or real pointer and keyboard behaviour. For a web application, add a dev server to the project's config: `browser_check` at the top level, or in `workspace.repos.<name>` for a workspace or home install:
+
+```json
+"browser_check": {
+  "start": {"argv": ["npx", "--no-install", "ng", "serve", "--port", "4300"], "cwd": "."},
+  "url": "http://localhost:4300/",
+  "startup_timeout_seconds": 180
+}
+```
+
+The planner lists `browser_checks` only for important results that the configured checks cannot see, at most 3, and most plans have none. You approve them with the plan. After an attempt is verified and reviewed, the orchestrator starts the dev server in the verification checkout and a browser agent checks each scenario with the Playwright CLI (`npm install -g @playwright/cli`). The agent sees the running application, not the code, and saves a screenshot for each result in `runs/<run-id>/artifacts/browser_check_<attempt>/`. A failed scenario goes back to the coder like a review blocker. The URL must be local, and nothing else may answer there when the check starts. The report has the results as `browser_check`. `doctor` shows whether browser checks are on.
+
 ### Reference docs and the context pack
 
 The repository's `.ai-nest/` folder, which Git ignores in every install mode, holds what stays on your machine: the chat's request files, your reference documents and the context packs.

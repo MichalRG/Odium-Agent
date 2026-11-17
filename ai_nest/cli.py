@@ -22,6 +22,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from typing import Any
 
@@ -59,11 +61,13 @@ _STAGE_FIELDS = {
     'plan': {'tasks': _list_of(_obj({'id': _STRING, 'description': _STRING, 'files': _STRINGS})),
              'testing_strategy': _STRING, 'risks': _STRINGS,
              'commits': _list_of(_obj({'message': _STRING, 'tasks': _STRINGS})),
-             'test_changes': _list_of(_obj({'file': _STRING, 'reason': _STRING}))},
+             'test_changes': _list_of(_obj({'file': _STRING, 'reason': _STRING})), 'browser_checks': _STRINGS},
     'tests': {**_CHANGE, 'expected_red_tests': _STRINGS, 'coder_guidance': _STRINGS,
               'test_strategy': _obj({level: _STRINGS for level in ('unit', 'integration', 'contract', 'e2e', 'smoke')})},
     'protected_tests': _CHANGE, 'implement': _CHANGE, 'bootstrap': _CHANGE, 'repair': _CHANGE,
     'review': _VERDICT, 'security_review': _VERDICT,
+    'browser': {**_VERDICT, 'scenarios': _list_of(_obj({'scenario': _STRING, 'passed': {'type': 'boolean'},
+                                                        'evidence': _STRING, 'screenshot': _STRING}))},
 }
 # Strict JSON Schemas: Codex and Claude enforce them, parse_result enforces them for every provider.
 SCHEMAS = {stage: _obj({**fields, 'observations': _list_of(_OBSERVATION)}) for stage, fields in _STAGE_FIELDS.items()}
@@ -232,6 +236,7 @@ def workspace_config(cfg: dict, home: Path, repo: Path) -> dict:
     return {**cfg, 'verification': {**cfg.get('verification', {}), 'commands': checks, 'autodetect': False},
             'tdd': {**cfg.get('tdd', {}), 'red_commands': red},
             'environment': {**cfg.get('environment', {}), 'setup_commands': setup},
+            **({'browser_check': entry['browser_check']} if 'browser_check' in entry else {}),
             'workspace_run': {'workspace': str(home), 'repository': name,
                               'other_repositories': sorted(r for r in repos if r != name),
                               **({'path': str(repo)} if by_path else {})}}
@@ -274,6 +279,69 @@ def read_config(repo: Path) -> dict:
     if cfg.get('policy_version') != '2026-11':
         raise Blocked('Unsupported policy_version. Expected 2026-11.')
     return cfg
+
+
+LOCAL_URL = re.compile(r'http://(localhost|127\.0\.0\.1)(:\d{1,5})?(/\S*)?')
+
+
+def browser_settings(cfg: dict) -> dict | None:
+    """The project's dev server for browser checks, or None when it has none."""
+    entry = cfg.get('browser_check')
+    if entry is None:
+        return None
+    start = entry.get('start') if isinstance(entry, dict) else None
+    timeout = entry.get('startup_timeout_seconds', 180) if isinstance(entry, dict) else None
+    # Only a local URL: the browser agent must not be sent to other sites.
+    if not (isinstance(start, dict) and isinstance(start.get('argv'), list) and start['argv']
+            and all(isinstance(a, str) for a in start['argv']) and isinstance(start.get('cwd', '.'), str)
+            and LOCAL_URL.fullmatch(str(entry.get('url', ''))) and isinstance(timeout, int) and timeout > 0):
+        raise Blocked('browser_check needs "start": {"argv": [...], "cwd": "."}, a local "url" such as '
+                      'http://localhost:4200/, and optionally "startup_timeout_seconds" (a positive integer).')
+    return {'argv': start['argv'], 'cwd': start.get('cwd', '.'), 'url': entry['url'], 'timeout': timeout}
+
+
+def answers(url: str) -> bool:
+    try:
+        # A proxy from the environment must not answer for the local dev server.
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=5).close()
+    except urllib.error.HTTPError:
+        return True  # an error page is an answer: the server is up
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+@contextlib.contextmanager
+def dev_server(tree: Path, browser: dict, log: Path):
+    """Run the project's dev server from `tree` while the block runs."""
+    if answers(browser['url']):
+        raise Unrepairable(f'{browser["url"]} answers before the dev server starts; stop what listens there '
+                           'or change browser_check.url.')
+    cwd = tree / browser['cwd']
+    if not is_inside(cwd, tree) or not cwd.is_dir():
+        raise Unrepairable(f'browser_check.start.cwd is not a folder of the repository: {browser["cwd"]}')
+    with log.open('w', encoding='utf-8') as out:
+        proc = subprocess.Popen(browser['argv'], cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, env={**os.environ, 'CI': 'true'},
+                                start_new_session=(os.name == 'posix'))
+    try:
+        deadline = time.monotonic() + browser['timeout']
+        while not answers(browser['url']):
+            if proc.poll() is not None:
+                raise Blocked(f'The dev server stopped with exit {proc.returncode}; see {log}')
+            if time.monotonic() > deadline:
+                raise Blocked(f'The dev server did not answer at {browser["url"]} within {browser["timeout"]}s; see {log}')
+            time.sleep(1)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGTERM) if os.name == 'posix' else proc.terminate()
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL) if os.name == 'posix' else proc.kill()
+            proc.wait()
 
 
 def call(argv: list[str], cwd: Path, timeout: int = 600, input_text: str | None = None,
@@ -840,7 +908,7 @@ class CLIProvider:
             argv = ['codex', 'exec', *self.model_args(stage), '--sandbox',
                     'workspace-write' if write else 'read-only',
                     # Scaffolding runs package managers (uv, npm), which need the registry.
-                    *(['-c', 'sandbox_workspace_write.network_access=true'] if stage == 'bootstrap' else []),
+                    *(['-c', 'sandbox_workspace_write.network_access=true'] if stage in ('bootstrap', 'browser') else []),
                     '--output-schema', str(sf), '--output-last-message', str(final), '-']
             p = call(argv, cwd, timeout, input_text=prompt, **watch)
             raw = final.read_text(encoding='utf-8') if final.exists() else ''
@@ -1191,7 +1259,7 @@ def load_approved_plan(repo: Path, run_id: str) -> dict:
 
 
 def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dict,
-               repository: str | None = None) -> None:
+               repository: str | None = None, browser_ready: bool = False) -> None:
     where = f' --repo {repository}' if repository not in (None, '.') else ''
     lines = [f'[AI Nest] PLAN READY FOR APPROVAL (session={session}, run={run_id})',
              f'Goal: {spec["goal"]}', 'Acceptance criteria:']
@@ -1207,6 +1275,10 @@ def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dic
     if plan.get('test_changes'):
         lines.append('Existing tests to change (approving the plan allows the test engineer these edits):')
         lines += [f'  - {c["file"]}: {c["reason"]}' for c in plan['test_changes']]
+    if plan.get('browser_checks'):
+        lines.append('Browser checks (Playwright CLI, after the review)'
+                     + ('' if browser_ready else '; not run, because the project has no browser_check') + ':')
+        lines += [f'  - {check}' for check in plan['browser_checks']]
     lines += [f'Testing: {plan["testing_strategy"]}',
               f'Approve: python ai_nest/cli.py run{where} --from-plan {run_id} --provider <provider> --allow-host-execution',
               f'Change:  python ai_nest/cli.py plan{where} --session "{session}" ... "<request + owner feedback>"']
@@ -1229,6 +1301,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
     assert_git_clean(repo)
     effective_checks(repo, cfg)
     validate_outer_verify_timeout(repo, cfg)
+    browser = browser_settings(cfg)
     tdd = cfg.get('tdd', {})
     tdd_enabled = tdd.get('enabled', True) and not bootstrap  # no test runner exists yet for RED
     if tdd_enabled:
@@ -1246,7 +1319,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
             planned = json.loads(planning.read_text(encoding='utf-8'))
             print(f'[AI Nest] same request, session and commit as run {earlier["run_id"]}: its plan stands', flush=True)
             print_plan(earlier['run_id'], report['session'], planned['discovery'], planned['specification'],
-                       planned['plan'], os.path.relpath(repo))
+                       planned['plan'], os.path.relpath(repo), browser_settings(cfg) is not None)
             return 0
         if report['status'] == 'needs_answers':
             print_questions(report['session'], earlier['run_id'], report['open_questions'])
@@ -1330,10 +1403,16 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 summary.update({'status': 'planned', 'completed': now()})
                 write_json(run_root / 'report.json', summary)
                 session.record_result('planned', run_root / 'report.json')
-                print_plan(run_id, session.name, discovery, spec, plan, os.path.relpath(repo))
+                print_plan(run_id, session.name, discovery, spec, plan, os.path.relpath(repo), browser is not None)
                 return 0
         # Plans made before commit planning existed have none; the merge then makes one commit.
         summary['planned_commits'] = plan.get('commits', [])
+        browser_checks = plan.get('browser_checks', []) if browser else []
+        if plan.get('browser_checks') and not browser:
+            summary['browser_checks_not_run'] = 'The project has no browser_check in nest.config.json.'
+        if browser_checks and shutil.which('playwright-cli') is None:
+            raise Blocked('The plan has browser checks, but playwright-cli is not in PATH: '
+                          'npm install -g @playwright/cli')
         public_patch = None
         public_files: list[str] = []
         red_status = 'not_run'
@@ -1412,6 +1491,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                             'note': 'Locally verified only. No remote CI/human review, PR, merge or deployment.'})
             if result['security_review'] is not None:
                 summary['security_review'] = result['security_review']
+            if result['browser'] is not None:
+                summary['browser_check'] = result['browser']
             if bootstrap:
                 summary['created_protected_files'] = sorted(result['created'])
                 print('[AI Nest] Bootstrap created build/test config; review it before committing: '
@@ -1555,11 +1636,29 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                     if not sec['approved'] and not sec['findings']:
                         raise Unrepairable('Security reviewer withheld approval without specific findings.')
                     security = sec
+                checked = None
+                if browser_checks:
+                    # The browser agent sees the running app, like a user, and no code.
+                    browser_dir = artifacts / f'browser_check_{attempt}'
+                    browser_dir.mkdir()
+                    git(browser_dir, 'init', '-q')  # provider CLIs and the progress watch expect a Git folder
+                    with dev_server(verify_tree, browser, artifacts / f'dev_server_{attempt}.log'):
+                        checked = provider.run('browser', browser_dir, {
+                            'browser': {'url': browser['url'], 'scenarios': browser_checks,
+                                        'session': f'nest-{run_id}', 'screenshots': str(browser_dir)},
+                            'specification': spec, 'nest_session': session.handoff_context('browser')}, write=True)
+                    session.record('browser', checked, attempt=attempt)
+                    failed = [c for c in checked['scenarios'] if not c['passed']]
+                    if failed or blocking_findings(checked, cfg) or len(checked['scenarios']) < len(browser_checks):
+                        feedback = {'cause': 'browser_check_failed', 'failed_scenarios': failed,
+                                    'findings': checked['findings'], 'summary': checked['summary']}
+                        print(f'[AI Nest] attempt {attempt}: browser check failed: {checked["summary"]}', flush=True)
+                        continue
                 if git(code_tree, 'rev-parse', 'HEAD') != base_commit:
                     raise Blocked('Final worktree HEAD differs from trusted base commit')
                 accepted = {'attempt': attempt, 'code_files': code_files, 'review': review,
                             'verification': str(verification_file), 'code_patch': code_patch,
-                            'security_review': security, 'created': created}
+                            'security_review': security, 'created': created, 'browser': checked}
                 to_fix = findings_to_fix(review, cfg)
                 if to_fix and attempt < max_attempts:
                     feedback = {'cause': 'review_findings_to_fix', 'findings': to_fix,
@@ -1677,6 +1776,7 @@ def doctor(repo: Path, provider: str) -> int:
             if not red:
                 raise Blocked('TDD enabled but tdd.red_commands is not configured.')
             effective_checks(repo, {'verification': {'commands': red, 'require_project_checks': True}})
+        browser = browser_settings(cfg)
     except Blocked as ex:
         print(f'NOT READY: {ex}')
         return 1
@@ -1686,6 +1786,11 @@ def doctor(repo: Path, provider: str) -> int:
     docs = reference_docs(repo)
     print(f'Reference docs for the explorer: {docs["folder"]}, {len(docs["files"])} file(s)' if docs else
           f'Reference docs for the explorer: none; put documents about the project in {repo / ".ai-nest/docs"}')
+    if browser and shutil.which('playwright-cli') is None:
+        print('NOT READY: browser_check is configured, but playwright-cli is not in PATH: npm install -g @playwright/cli')
+        return 1
+    print(f'Browser checks: {" ".join(browser["argv"])} serves {browser["url"]}; the plan chooses when they run'
+          if browser else 'Browser checks: off; add browser_check to nest.config.json for a web app')
     # The portable skill calls verify.sh. Detect an unconfigured manifest in
     # doctor rather than claiming the project is ready before a run begins.
     configured_gate = any(c['argv'][:2] == ['bash', 'scripts/verify.sh']

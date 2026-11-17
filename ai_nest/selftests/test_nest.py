@@ -168,7 +168,7 @@ class NestTests(unittest.TestCase):
 
     def test_plan_commits_must_list_every_task_exactly_once(self):
         plan = {'tasks': [{'id': 'T1', 'description': 'a', 'files': []}, {'id': 'T2', 'description': 'b', 'files': []}],
-                'testing_strategy': 'unit', 'risks': [], 'test_changes': [], 'observations': []}
+                'testing_strategy': 'unit', 'risks': [], 'test_changes': [], 'browser_checks': [], 'observations': []}
         for commits in ([{'message': 'A', 'tasks': ['T1']}],
                         [{'message': 'A', 'tasks': ['T1', 'T2']}, {'message': 'B', 'tasks': ['T2']}],
                         [{'message': 'A', 'tasks': ['T1', 'T2', 'T3']}]):
@@ -356,7 +356,7 @@ class NestTests(unittest.TestCase):
                     if stage == 'plan':
                         return {'tasks': [{'id': 't1', 'description': 'fix add', 'files': ['calc.py']}],
                                 'commits': [{'message': 'Fix add', 'tasks': ['t1']}],
-                                'testing_strategy': 'unit tests', 'risks': [], 'test_changes': [], 'observations': [note]}
+                                'testing_strategy': 'unit tests', 'risks': [], 'test_changes': [], 'browser_checks': [], 'observations': [note]}
                     if stage == 'tests':
                         self_ref = cwd / 'tests' / 'test_feature.py'
                         self_ref.write_text('import unittest\nfrom calc import add\n'
@@ -668,6 +668,16 @@ class NestTests(unittest.TestCase):
                     agent.run('explore', Path(tmp), {})
             self.assertNotIsInstance(caught.exception, nest.ProviderUnreachable)
             slept.assert_not_called()
+
+    def test_browser_check_takes_only_a_local_url_and_a_start_command(self):
+        good = {'start': {'argv': ['npx', 'ng', 'serve']}, 'url': 'http://localhost:4200/'}
+        self.assertEqual(nest.browser_settings({'browser_check': good}),
+                         {'argv': ['npx', 'ng', 'serve'], 'cwd': '.', 'url': 'http://localhost:4200/', 'timeout': 180})
+        self.assertIsNone(nest.browser_settings({}))
+        for bad in ({**good, 'url': 'https://example.com/'}, {**good, 'url': 'http://localhost.example.com/'},
+                    {**good, 'start': {'argv': []}}, {**good, 'startup_timeout_seconds': '60'}, []):
+            with self.assertRaisesRegex(nest.Blocked, 'browser_check needs'):
+                nest.browser_settings({'browser_check': bad})
 
     def test_context_pack_copies_only_tracked_code_within_its_budget(self):
         with tempfile.TemporaryDirectory() as tmp:

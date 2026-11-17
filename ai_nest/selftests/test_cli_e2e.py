@@ -2,10 +2,12 @@
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2] if Path(__file__).resolve().parent.name == 'selftests' else Path(__file__).resolve().parents[1]
 
@@ -39,7 +41,8 @@ elif '# Role: specification writer' in prompt:
 elif '# Role: planner' in prompt:
     result = {'tasks':[{'id':'T1','description':'correct add','files':['calcx.py' if scenario == 'red_new_module' else 'calc.py']}], 'testing_strategy':'unit','risks':[],
               'commits':[{'message':'Correct add','tasks':['T1']}],
-              'test_changes':[{'file':'tests/test_existing.py','reason':'test_zero must also cover add(0,1)'}] if scenario == 'test_change' else []}
+              'test_changes':[{'file':'tests/test_existing.py','reason':'test_zero must also cover add(0,1)'}] if scenario == 'test_change' else [],
+              'browser_checks':['Open the page; it lists calc.py'] if scenario.startswith('browser') else []}
 elif '# Role: test-engineer — PUBLIC' in prompt:
     if scenario == 'red_invalid':
         body = 'import totally_missing_dependency_123\n'
@@ -118,6 +121,8 @@ elif '# Role: coder repair' in prompt:
         # Fixing the findings starts from the approved code; the test-file finding is not sent.
         assert 'add repeats logic' in prompt and 'weak test' not in prompt
         assert 'a+b' in (base/'calc.py').read_text()
+    if scenario == 'browser_fail':
+        assert 'browser_check_failed' in prompt and 'items on the sea' in prompt
     if scenario == 'review_fix_breaks':
         (base/'calc.py').write_text('def add(a,b):\n    return a-b\n')
     else:
@@ -134,6 +139,18 @@ elif '# Role: bootstrapper' in prompt:
         (base/rel).parent.mkdir(parents=True, exist_ok=True)
         (base/rel).write_text(data)
     result = {'summary':'scaffolded', 'files_modified':sorted(files)}
+elif '# Role: browser tester' in prompt:
+    import re, urllib.request
+    url = re.search(r'"url": "([^"]+)"', prompt).group(1)
+    shots = Path(re.search(r'"screenshots": "([^"]+)"', prompt).group(1))
+    served = urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url + 'calc.py', timeout=5).read().decode()
+    assert 'a+b' in served.replace(' ', ''), served  # the dev server runs the verified code
+    (shots / '1-page.png').write_bytes(b'png')
+    ok = scenario != 'browser_fail'
+    result = {'approved': ok, 'summary': 'page checked' if ok else 'items on the sea',
+              'findings': [] if ok else [{'severity':'high','file':'/','problem':'items on the sea','evidence':'open /'}],
+              'scenarios': [{'scenario':'Open the page; it lists calc.py','passed':ok,'evidence':'saw calc.py',
+                             'screenshot':str(shots / '1-page.png')}]}
 elif '# Role: code-reviewer' in prompt or '# Role: security-reviewer' in prompt:
     result = {'approved':True,'findings':[],'summary':'approved'}
     earlier_reviews = Path(args[args.index('--output-last-message') + 1]).parent.glob('review_*.answer.json')
@@ -228,6 +245,50 @@ class EndToEndTests(unittest.TestCase):
         report = json.loads(Path(p.stdout.split('Report: ')[-1].strip()).read_text())
         self.assertEqual(sorted(report['public_test_files']), ['tests/test_existing.py', 'tests/test_feature.py'])
         self.assertEqual([c['file'] for c in report['approved_test_changes']], ['tests/test_existing.py'])
+
+    def browser_project(self, scenario):
+        root, env = self.feature_project(scenario)
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        url = f'http://127.0.0.1:{port}/'
+        cfg = json.loads((root / 'nest.config.json').read_text())
+        cfg['browser_check'] = {'start': {'argv': [sys.executable, '-m', 'http.server', str(port), '--bind', '127.0.0.1'],
+                                          'cwd': '.'}, 'url': url, 'startup_timeout_seconds': 30}
+        (root / 'nest.config.json').write_text(json.dumps(cfg))
+        cmd(root, 'git', 'commit', '-qam', 'browser check')
+        tool = Path(env['PATH'].split(os.pathsep)[0]) / 'playwright-cli'
+        tool.write_text('#!/bin/sh\nexit 0\n')
+        tool.chmod(0o755)
+        return root, env, url
+
+    def test_browser_check_runs_the_planned_scenarios_against_the_dev_server(self):
+        root, env, url = self.browser_project('browser')
+        self.assertIn(f'serves {url}', self.nest(root, env, 'doctor').stdout)
+        p = self.nest(root, env, 'run', '--session', 'b', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        report = json.loads(Path(p.stdout.split('Report: ')[-1].strip()).read_text())
+        scenario = report['browser_check']['scenarios'][0]
+        self.assertTrue(scenario['passed'])
+        self.assertTrue(Path(scenario['screenshot']).is_file())
+        with self.assertRaises(OSError, msg='the dev server stops after the check'):
+            urllib.request.urlopen(url, timeout=2)
+
+    def test_failed_browser_check_goes_back_to_the_coder(self):
+        root, env, url = self.browser_project('browser_fail')
+        p = self.nest(root, env, 'run', '--session', 'b', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+        self.assertIn('browser check failed: items on the sea', p.stdout)
+        run_dir = next((root / '.ai-nest/runs').iterdir())
+        self.assertIn('browser_check_failed', json.loads((run_dir / 'report.json').read_text())['error'])
+        self.assertEqual(sorted(d.name for d in (run_dir / 'artifacts').glob('browser_check_*')), ['browser_check_1', 'browser_check_2'])
+
+    def test_plan_shows_browser_checks_that_cannot_run(self):
+        root, env = self.feature_project('browser')
+        p = self.nest(root, env, 'plan', '--session', 'b', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('not run, because the project has no browser_check', p.stdout)
+        self.assertIn('  - Open the page; it lists calc.py', p.stdout)
 
     def test_long_request_is_read_from_a_file(self):
         root, env = self.feature_project('happy')

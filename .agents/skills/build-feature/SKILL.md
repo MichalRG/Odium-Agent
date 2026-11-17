@@ -42,7 +42,7 @@ The user invokes this skill once. Carry the whole feature through this conversat
    ```
    The nest scouts the repository and its documents, writes the specification and the plan, and stops. It changes no code. When HEAD has not moved, a later `plan` in the same session whose request adds text at the end of the earlier request reuses the scouting and runs only the specification and the plan; with an unchanged request it prints the earlier result again without running agents. So keep the same session for every round, and add answers and feedback at the end of the request. Act on the exit code:
    - **2: questions.** **Checkpoint:** show the questions exactly as printed and wait for the answers. Then run `plan` again with the same session. The request is the original text, followed by `Owner answers:` and each question with its answer.
-   - **0: plan ready.** **Checkpoint:** show the goal, acceptance criteria, constraints, risks, tasks, planned commits and the existing tests to change from the output (the full data is in `.ai-nest/runs/<run-id>/artifacts/planning.json`). Ask the user to approve it, change it or stop.
+   - **0: plan ready.** **Checkpoint:** show the goal, acceptance criteria, constraints, risks, tasks, planned commits, the existing tests to change and the browser checks from the output (the full data is in `.ai-nest/runs/<run-id>/artifacts/planning.json`). Ask the user to approve it, change it or stop.
      - The existing tests to change are part of what the user approves: the test engineer may change those files, and no other existing tests. When the request changes behaviour that an existing test asserts and the plan does not list that test, say so and ask for the change as feedback.
      - For a change, run `plan` again with the same session. The request is the previous request, followed by `Owner feedback on the previous plan:` and the feedback. Then repeat this checkpoint.
      - When the plan has more than about 5 tasks, touches more than about 10 files, or joins parts that can work on their own (for example a data model, a CLI and platform adapters), recommend building it in slices (see Slices) and propose the slices in order.
@@ -51,7 +51,7 @@ The user invokes this skill once. Carry the whole feature through this conversat
    ```bash
    python ai_nest/cli.py run --from-plan <plan-run-id> --provider <provider> --allow-host-execution
    ```
-   The nest writes failing public tests, implements, verifies in a fresh checkout, reviews and repairs within its budget. This step has no checkpoint. If the command says that HEAD moved, go back to step 2 and get approval for the new plan.
+   The nest writes failing public tests, implements, verifies in a fresh checkout, reviews, runs the plan's browser checks against the dev server, and repairs within its budget. This step has no checkpoint. If the command says that HEAD moved, go back to step 2 and get approval for the new plan.
 4. **Result.** **Checkpoint:** report as described in Report. When the run is verified, show `git -C <worktree> diff --stat HEAD`, offer the full diff, and show the commits you will make at the merge:
    - Take the `planned_commits` from `report.json`, in their order. Give each changed file (`git -C <worktree> status --porcelain`) to the commit whose tasks name it. A test file goes with the commit whose behaviour it covers. A file that several commits need goes in the first of them. A file that no task names goes where its content belongs.
    - Check the sizes in the actual diff: `git -C <worktree> diff --stat HEAD` for changed files, and the line count of each new file. Aim for about 50 to 400 changed lines per commit. Join a commit of less than about 50 lines, or one that only documents or completes another (notes, a dependency, a small helper), into the commit that it belongs to, with one message for both. Split a larger commit only where each part makes sense on its own.
@@ -87,4 +87,4 @@ The core explorer/planner/coder/reviewer stages remain fixed. Optional security 
 
 ## Report
 
-Inspect `.ai-nest/runs/<run-id>/report.json`, session handoffs and the verification artifacts. Report the actual status, run/session IDs, executed stages, RED outcome, verification results, review/routing decisions, outstanding issues and worktree. Never claim tests or AI stages that were not actually executed.
+Inspect `.ai-nest/runs/<run-id>/report.json`, session handoffs and the verification artifacts. Report the actual status, run/session IDs, executed stages, RED outcome, verification results, review/routing decisions, the browser check (each scenario, its result and its screenshot path), outstanding issues and worktree. Never claim tests or AI stages that were not actually executed.

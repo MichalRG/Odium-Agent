@@ -168,7 +168,7 @@ class NestTests(unittest.TestCase):
 
     def test_plan_commits_must_list_every_task_exactly_once(self):
         plan = {'tasks': [{'id': 'T1', 'description': 'a', 'files': []}, {'id': 'T2', 'description': 'b', 'files': []}],
-                'testing_strategy': 'unit', 'risks': [], 'observations': []}
+                'testing_strategy': 'unit', 'risks': [], 'test_changes': [], 'observations': []}
         for commits in ([{'message': 'A', 'tasks': ['T1']}],
                         [{'message': 'A', 'tasks': ['T1', 'T2']}, {'message': 'B', 'tasks': ['T2']}],
                         [{'message': 'A', 'tasks': ['T1', 'T2', 'T3']}]):
@@ -356,7 +356,7 @@ class NestTests(unittest.TestCase):
                     if stage == 'plan':
                         return {'tasks': [{'id': 't1', 'description': 'fix add', 'files': ['calc.py']}],
                                 'commits': [{'message': 'Fix add', 'tasks': ['t1']}],
-                                'testing_strategy': 'unit tests', 'risks': [], 'observations': [note]}
+                                'testing_strategy': 'unit tests', 'risks': [], 'test_changes': [], 'observations': [note]}
                     if stage == 'tests':
                         self_ref = cwd / 'tests' / 'test_feature.py'
                         self_ref.write_text('import unittest\nfrom calc import add\n'

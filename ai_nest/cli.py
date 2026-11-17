@@ -58,7 +58,8 @@ _STAGE_FIELDS = {
     'specify': {'goal': _STRING, 'acceptance_criteria': _STRINGS, 'constraints': _STRINGS, 'open_questions': _STRINGS},
     'plan': {'tasks': _list_of(_obj({'id': _STRING, 'description': _STRING, 'files': _STRINGS})),
              'testing_strategy': _STRING, 'risks': _STRINGS,
-             'commits': _list_of(_obj({'message': _STRING, 'tasks': _STRINGS}))},
+             'commits': _list_of(_obj({'message': _STRING, 'tasks': _STRINGS})),
+             'test_changes': _list_of(_obj({'file': _STRING, 'reason': _STRING}))},
     'tests': {**_CHANGE, 'expected_red_tests': _STRINGS, 'coder_guidance': _STRINGS,
               'test_strategy': _obj({level: _STRINGS for level in ('unit', 'integration', 'contract', 'e2e', 'smoke')})},
     'protected_tests': _CHANGE, 'implement': _CHANGE, 'bootstrap': _CHANGE, 'repair': _CHANGE,
@@ -544,7 +545,7 @@ def is_test_file(filename: str, cfg: dict) -> bool:
 
 
 def assert_authorized_changes(repo: Path, cfg: dict, role: str, *, public_files: list[str] | None = None,
-                              public_reference: Path | None = None) -> list[str]:
+                              public_reference: Path | None = None, editable_tests: set[str] = frozenset()) -> list[str]:
     files = changed_files(repo)
     # A test author can add a NEW fixture in a test directory. Existing shared
     # fixtures and all other gate policy files remain protected for every role.
@@ -582,9 +583,10 @@ def assert_authorized_changes(repo: Path, cfg: dict, role: str, *, public_files:
             raise Blocked(f'Test agent wrote outside allowed test paths: {unexpected}')
         if not cfg.get('safety', {}).get('allow_existing_test_modifications', False):
             existing = tracked_base
-            altered = [f for f in files if f in existing]
+            altered = [f for f in files if f in existing and f not in editable_tests]
             if altered:
-                raise Blocked(f'Test agent may only add new test files, not modify existing ones: {altered}')
+                raise Blocked(f'Test agent may only add new test files, and change the existing ones that the '
+                              f'owner approved in the plan, not: {altered}')
     if role == 'coder':
         permitted = set(public_files or ())
         modified_test_files = [f for f in files if is_test_file(f, cfg)]
@@ -618,10 +620,11 @@ def changed_files(repo: Path, base: str = 'HEAD') -> list[str]:
 
 def get_patch(repo: Path, out: Path, cfg: dict, test_only: bool = False,
               forbid_tests: bool = False, *, public_files: list[str] | None = None,
-              public_reference: Path | None = None, bootstrap: bool = False) -> list[str]:
+              public_reference: Path | None = None, bootstrap: bool = False,
+              editable_tests: set[str] = frozenset()) -> list[str]:
     role = 'bootstrap' if bootstrap else 'tests' if test_only else 'coder' if forbid_tests else 'general'
     files = assert_authorized_changes(repo, cfg, role, public_files=public_files,
-                                      public_reference=public_reference)
+                                      public_reference=public_reference, editable_tests=editable_tests)
     if not files:
         raise Blocked('Agent did not produce any changed files.')
     # Public TDD files are in the coder checkout, but must not be duplicated in its patch.
@@ -1201,6 +1204,9 @@ def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dic
     lines += [f'  {t["id"]}: {t["description"]} [{", ".join(t["files"])}]' for t in plan['tasks']]
     lines.append('Commits:')
     lines += [f'  {i}. {c["message"]} ({", ".join(c["tasks"])})' for i, c in enumerate(plan['commits'], 1)]
+    if plan.get('test_changes'):
+        lines.append('Existing tests to change (approving the plan allows the test engineer these edits):')
+        lines += [f'  - {c["file"]}: {c["reason"]}' for c in plan['test_changes']]
     lines += [f'Testing: {plan["testing_strategy"]}',
               f'Approve: python ai_nest/cli.py run{where} --from-plan {run_id} --provider <provider> --allow-host-execution',
               f'Change:  python ai_nest/cli.py plan{where} --session "{session}" ... "<request + owner feedback>"']
@@ -1333,15 +1339,24 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         red_status = 'not_run'
         red_result = None
         if tdd_enabled:
+            # Only the owner, by approving the plan, lets the test engineer change existing tests.
+            test_changes = [c for c in plan.get('test_changes', []) if is_test_file(c['file'], cfg)] if approved else []
+            if plan.get('test_changes') and not approved:
+                print('[AI Nest] the plan lists changes to existing tests; only an approved plan '
+                      '(run --from-plan) allows them', flush=True)
+            if test_changes:
+                summary['approved_test_changes'] = test_changes
             tests_context = {**context, 'specification': spec, 'discovery': discovery,
                              'plan': plan, 'test_visibility': 'public',
                              'test_policy': {'existing_test_files_editable': bool(
-                                 cfg.get('safety', {}).get('allow_existing_test_modifications', False))}}
+                                 cfg.get('safety', {}).get('allow_existing_test_modifications', False)),
+                                 'approved_test_changes': test_changes}}
             for tests_attempt in (1, 2):
                 tests = agent_stage(provider, session, 'tests', public_tree, tests_context,
                                     write=True, attempt=tests_attempt)
                 public_patch = artifacts / 'public_tests.patch'
-                public_files = get_patch(public_tree, public_patch, cfg, test_only=True)
+                public_files = get_patch(public_tree, public_patch, cfg, test_only=True,
+                                         editable_tests={normalized_path(c['file']) for c in test_changes})
                 if set(tests['files_modified']) != set(public_files):
                     raise Blocked('Test engineer declared files do not match public test patch.')
                 setup_environment(public_tree, cfg, artifacts / 'public_setup.json')

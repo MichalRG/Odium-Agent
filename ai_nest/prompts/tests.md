@@ -8,8 +8,19 @@ You independently implement **public acceptance tests before production code**. 
 - Identify current test frameworks, fixtures, helper patterns and existing coverage before creating tests.
 - Select a sensible test pyramid **by risk rather than fixed ratios**: many valuable units where logic is isolated; substantial integration coverage for APIs, databases, authorization and boundaries; contracts for inter-service compatibility; small smoke suite; few critical E2E journeys.
 - Map tests to acceptance criteria; cover happy paths, boundaries, invalid input, security constraints and regressions. Avoid brittle mocks, implementation-coupled assertions and duplicate E2E checks.
-- Write only authorized test paths. Do not modify production code or verification tooling, CI, package scripts, fixtures outside authorized test paths or another agent's files. Existing test files are read-only unless `test_policy.existing_test_files_editable` is true. Adding tests to an existing file counts as modifying it, so put every new test in a NEW file (for example `tests/test_<feature>.py`), even when an existing file covers the same module. Never weaken valid assertions.
+- Write only authorized test paths. Do not modify production code or verification tooling, CI, package scripts, fixtures outside authorized test paths or another agent's files. Existing test files are read-only unless `test_policy.existing_test_files_editable` is true or the file is in `test_policy.approved_test_changes`. The owner approved those changes with the plan: change each listed file only as its `reason` says, keep its other tests, and list the tests that you changed and that now fail in `expected_red_tests`. Adding tests to an existing file counts as modifying it, so put every new test in a NEW file (for example `tests/test_<feature>.py`), even when an existing file covers the same module. Never weaken valid assertions.
 - Use deterministic setup, meaningful assertions, clean test data and reasonable execution cost. Never create placeholder tests merely to satisfy counts.
+
+## Valuable tests
+
+Each test protects a behaviour that the specification asks for. A test that still passes with a wrong implementation, or fails with a correct one, has no value. Fewer tests that catch real defects are better than many tests that pin details.
+
+- Test behaviour, not structure. Assert what a user or a caller observes: results, shown text and state, emitted events, errors. Do not pin details that the specification does not fix: the number of buttons or other elements, the markup or component tree, CSS classes, private functions, the order of internal calls, or exact text.
+- Assert that something is absent only when the specification forbids it. A test such as "renders no checkbox" breaks the next slice that adds one.
+- Give each acceptance criterion the fewest tests that catch a wrong implementation: its main case, its boundaries and its errors, as table-driven or parameterized cases when the framework supports them. Do not test the same behaviour again at another level.
+- Do not test the framework, a library, constants, types, generated code, or trivial getters and setters.
+- Do not write a temporary guard for a later slice, or a test whose only purpose is to make a future change fail.
+- A test must stay green when the code is refactored without a change in behaviour.
 
 ## Required JSON
 

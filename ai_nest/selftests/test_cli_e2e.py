@@ -38,7 +38,8 @@ elif '# Role: specification writer' in prompt:
               'open_questions':['Should add accept floats?'] if scenario == 'questions' and 'Owner answers' not in prompt else []}
 elif '# Role: planner' in prompt:
     result = {'tasks':[{'id':'T1','description':'correct add','files':['calcx.py' if scenario == 'red_new_module' else 'calc.py']}], 'testing_strategy':'unit','risks':[],
-              'commits':[{'message':'Correct add','tasks':['T1']}]}
+              'commits':[{'message':'Correct add','tasks':['T1']}],
+              'test_changes':[{'file':'tests/test_existing.py','reason':'test_zero must also cover add(0,1)'}] if scenario == 'test_change' else []}
 elif '# Role: test-engineer — PUBLIC' in prompt:
     if scenario == 'red_invalid':
         body = 'import totally_missing_dependency_123\n'
@@ -56,6 +57,11 @@ elif '# Role: test-engineer — PUBLIC' in prompt:
         body = 'import unittest\nimport os\n' + body.replace('import unittest\n', '', 1)  # unsorted, like ruff I001
     (base/'tests/test_feature.py').write_text(body)
     files = ['tests/test_feature.py']
+    if scenario == 'test_change':
+        (base/'tests/test_existing.py').write_text('import unittest\nfrom calc import add\nclass TestExisting(unittest.TestCase):\n'
+                                                   '    def test_zero(self):\n        self.assertEqual(add(0,1),1)\n')
+        files.append('tests/test_existing.py')
+        expected = expected + ['test_zero']
     if scenario in ('new_fixture', 'new_nested_fixture', 'coder_nested_helper_edit'):
         (base/'tests/conftest.py').write_text('# newly added test-scoped fixture\n')
         files.append('tests/conftest.py')
@@ -205,6 +211,23 @@ class EndToEndTests(unittest.TestCase):
         stages = {f.name.split('_')[0] for f in (run_dir / 'artifacts').glob('*.schema.json')}
         self.assertFalse(stages & {'explore', 'specify', 'plan'}, stages)
         self.assertIn('implement', stages)
+
+    def test_approved_plan_lets_the_test_engineer_change_the_listed_existing_tests(self):
+        root, env = self.feature_project('test_change')
+        unapproved = self.nest(root, env, 'run', '--session', 'direct', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(unapproved.returncode, 1, unapproved.stdout + unapproved.stderr)
+        self.assertIn('only an approved plan', unapproved.stdout)
+        self.assertIn("not: ['tests/test_existing.py']", unapproved.stderr)
+        p = self.nest(root, env, 'plan', '--session', 'calc', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('  - tests/test_existing.py: test_zero must also cover add(0,1)', p.stdout)
+        plan_run = next(d.name for d in (root / '.ai-nest/runs').iterdir()
+                        if json.loads((d / 'report.json').read_text())['status'] == 'planned')
+        p = self.nest(root, env, 'run', '--from-plan', plan_run, '--allow-host-execution')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        report = json.loads(Path(p.stdout.split('Report: ')[-1].strip()).read_text())
+        self.assertEqual(sorted(report['public_test_files']), ['tests/test_existing.py', 'tests/test_feature.py'])
+        self.assertEqual([c['file'] for c in report['approved_test_changes']], ['tests/test_existing.py'])
 
     def test_long_request_is_read_from_a_file(self):
         root, env = self.feature_project('happy')

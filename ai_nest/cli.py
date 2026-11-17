@@ -25,7 +25,7 @@ import time
 import uuid
 from typing import Any
 
-from memory import SessionStore, list_sessions, inspect_session
+from memory import SessionStore, list_sessions, inspect_session, session_slug
 
 ROOT = Path(__file__).resolve().parent.parent
 NEST_RELEASE = '4.4'
@@ -115,6 +115,30 @@ def reference_docs(repo: Path) -> dict | None:
     files = sorted(p.relative_to(folder).as_posix() for p in folder.rglob('*')
                    if p.is_file() and not any(part.startswith('.') for part in p.relative_to(folder).parts))
     return {'folder': str(folder), 'files': files} if files else None
+
+
+def docs_digest(docs: dict | None) -> str:
+    digest = hashlib.sha256()
+    for name in (docs or {}).get('files', []):
+        digest.update(name.encode() + b'\0' + (Path(docs['folder']) / name).read_bytes() + b'\0')
+    return digest.hexdigest() if docs else ''
+
+
+def earlier_exploration(repo: Path, session_id: str, base_commit: str, docs: str, request: str) -> dict | None:
+    """The newest run of this session that explored this commit with the same reference docs, for the same
+    request or one that this request extends with appended text (owner answers or feedback)."""
+    # Run ids resolve to the second, so the time the exploration was written orders the runs.
+    for file in sorted((nest_home(repo) / '.ai-nest' / 'runs').glob('*/artifacts/exploration.json'),
+                       key=lambda f: f.stat().st_mtime_ns, reverse=True):
+        with contextlib.suppress(OSError, ValueError, KeyError, Blocked):
+            report = json.loads((file.parent.parent / 'report.json').read_text(encoding='utf-8'))
+            explored = json.loads(file.read_text(encoding='utf-8'))
+            if (report['session_id'], report['base_commit'], report['repository'], report['mode'], explored['docs']) \
+                    == (session_id, base_commit, str(repo), 'feature', docs) \
+                    and (request == report['request'] or request.startswith(report['request'].rstrip() + '\n')):
+                check_output('explore', explored['discovery'], SCHEMAS['explore'])  # made by an older release?
+                return {'run_id': file.parent.parent.name, 'report': report, 'discovery': explored['discovery']}
+    return None
 
 
 # shortcut: fixed budget for the code that every later stage gets; make it a limit when projects need more.
@@ -1156,6 +1180,13 @@ def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dic
     print('\n'.join(lines), flush=True)
 
 
+def print_questions(session: str, run_id: str, questions: list[str]) -> None:
+    print(f'[AI Nest] QUESTIONS BEFORE PLANNING (session={session}, run={run_id}):\n'
+          + '\n'.join(f'  {i}. {q}' for i, q in enumerate(questions, 1))
+          + '\nAnswer them, then run `plan` again with the same --session and the answers '
+            'added to the request.', flush=True)
+
+
 def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 session_name: str | None = None, bootstrap: bool = False,
                 plan_only: bool = False, approved: dict | None = None) -> int:
@@ -1170,11 +1201,27 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
     if tdd_enabled:
         if not tdd.get('red_commands'):
             raise Blocked('TDD enabled but tdd.red_commands is empty; configure targeted public test commands.')
+    base_commit = git(repo, 'rev-parse', 'HEAD')
+    docs = reference_docs(repo)
+    # A question or feedback round changes the request, not the code: the exploration still holds.
+    earlier = None if approved or bootstrap or not session_name else \
+        earlier_exploration(repo, session_slug(session_name), base_commit, docs_digest(docs), request)
+    if plan_only and earlier and earlier['report']['request'] == request:
+        report = earlier['report']
+        planning = nest_home(repo) / '.ai-nest' / 'runs' / earlier['run_id'] / 'artifacts' / 'planning.json'
+        if report['status'] == 'planned' and planning.is_file():
+            planned = json.loads(planning.read_text(encoding='utf-8'))
+            print(f'[AI Nest] same request, session and commit as run {earlier["run_id"]}: its plan stands', flush=True)
+            print_plan(earlier['run_id'], report['session'], planned['discovery'], planned['specification'],
+                       planned['plan'], os.path.relpath(repo))
+            return 0
+        if report['status'] == 'needs_answers':
+            print_questions(report['session'], earlier['run_id'], report['open_questions'])
+            return 2
     run_id = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:7]
     run_root = nest_home(repo) / '.ai-nest' / 'runs' / run_id
     artifacts = run_root / 'artifacts'
     artifacts.mkdir(parents=True)
-    base_commit = git(repo, 'rev-parse', 'HEAD')
     session = SessionStore(nest_home(repo), session_name or run_id, run_id, base_commit, project=repo.name)
     summary: dict = {'run_id': run_id, 'started': now(), 'status': 'running', 'repository': str(repo),
                      'request': request, 'provider': provider_name, 'base_commit': base_commit,
@@ -1201,6 +1248,9 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
             if run_checks(code_tree, cfg, artifacts / 'baseline.json', 'baseline')['passed']:
                 raise Blocked('Baseline already passes; bootstrap only creates missing project skeletons. Use `run`.')
             context['bootstrap'] = bootstrap_contract(code_tree, cfg)
+        elif plan_only and earlier:
+            # Planning runs no project code, and `run --from-plan` checks the baseline again.
+            print(f'[AI Nest] baseline: passed in run {earlier["run_id"]} on this commit', flush=True)
         else:
             setup_environment(code_tree, cfg, artifacts / 'baseline_setup.json')
             baseline = run_checks(code_tree, cfg, artifacts / 'baseline.json', 'baseline')
@@ -1211,9 +1261,14 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
             summary['approved_plan'] = approved['run_id']
             pack = approved.get('context_pack', '')  # plans made before context packs have none
         else:
-            docs = reference_docs(repo)
-            discovery = agent_stage(provider, session, 'explore', code_tree,
-                                    {**context, **({'reference_docs': docs} if docs else {})})
+            if earlier:
+                discovery, summary['reused_exploration'] = earlier['discovery'], earlier['run_id']
+                print(f'[AI Nest] explore: reusing run {earlier["run_id"]} (same session, commit and reference docs)',
+                      flush=True)
+            else:
+                discovery = agent_stage(provider, session, 'explore', code_tree,
+                                        {**context, **({'reference_docs': docs} if docs else {})})
+            write_json(artifacts / 'exploration.json', {'docs': docs_digest(docs), 'discovery': discovery})
             pack = build_context_pack(code_tree, discovery['context_pack'], base_commit) \
                 if discovery['context_pack']['excerpts'] or discovery['context_pack']['outline'].strip() else ''
         if pack:
@@ -1230,10 +1285,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                 'open_questions': spec['open_questions'], 'specification': spec})
                 write_json(run_root / 'report.json', summary)
                 session.record_result('needs_answers', run_root / 'report.json')
-                print(f'[AI Nest] QUESTIONS BEFORE PLANNING (session={session.name}, run={run_id}):\n'
-                      + '\n'.join(f'  {i}. {q}' for i, q in enumerate(spec['open_questions'], 1))
-                      + '\nAnswer them, then run `plan` again with the same --session and the answers '
-                        'added to the request.', flush=True)
+                print_questions(session.name, run_id, spec['open_questions'])
                 return 2
             plan = agent_stage(provider, session, 'plan', code_tree,
                                {**context, 'discovery': discovery, 'specification': spec})

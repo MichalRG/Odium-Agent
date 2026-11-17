@@ -40,7 +40,7 @@ The user invokes this skill once. Carry the whole feature through this conversat
    python ai_nest/cli.py plan --provider <provider> --session <session> \
      --allow-host-execution --request-file .ai-nest/requests/<session>.md
    ```
-   The nest scouts the repository and its documents, writes the specification and the plan, and stops. It changes no code. Act on the exit code:
+   The nest scouts the repository and its documents, writes the specification and the plan, and stops. It changes no code. When HEAD has not moved, a later `plan` in the same session whose request adds text at the end of the earlier request reuses the scouting and runs only the specification and the plan; with an unchanged request it prints the earlier result again without running agents. So keep the same session for every round, and add answers and feedback at the end of the request. Act on the exit code:
    - **2: questions.** **Checkpoint:** show the questions exactly as printed and wait for the answers. Then run `plan` again with the same session. The request is the original text, followed by `Owner answers:` and each question with its answer.
    - **0: plan ready.** **Checkpoint:** show the goal, acceptance criteria, constraints, risks, tasks and planned commits from the output (the full data is in `.ai-nest/runs/<run-id>/artifacts/planning.json`). Ask the user to approve it, change it or stop.
      - For a change, run `plan` again with the same session. The request is the previous request, followed by `Owner feedback on the previous plan:` and the feedback. Then repeat this checkpoint.

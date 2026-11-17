@@ -35,7 +35,7 @@ if '# Role: explorer' in prompt:
                                           {'file':'../outside.py','start_line':1,'end_line':1,'why':'escape'}]}}
 elif '# Role: specification writer' in prompt:
     result = {'goal':'correct add','acceptance_criteria':['add(1,2)==3'], 'constraints':[],
-              'open_questions':['Should add accept floats?'] if scenario == 'questions' else []}
+              'open_questions':['Should add accept floats?'] if scenario == 'questions' and 'Owner answers' not in prompt else []}
 elif '# Role: planner' in prompt:
     result = {'tasks':[{'id':'T1','description':'correct add','files':['calcx.py' if scenario == 'red_new_module' else 'calc.py']}], 'testing_strategy':'unit','risks':[],
               'commits':[{'message':'Correct add','tasks':['T1']}]}
@@ -229,6 +229,39 @@ class EndToEndTests(unittest.TestCase):
         self.assertFalse((run_dir / 'artifacts/planning.json').exists())
         self.assertNotEqual(self.nest(root, env, 'run', '--from-plan', run_dir.name,
                                       '--allow-host-execution').returncode, 0)
+
+    def test_plan_rounds_reuse_the_exploration_and_an_unchanged_plan(self):
+        root, env = self.feature_project('questions')
+        runs = root / '.ai-nest/runs'
+        ask = ('plan', '--session', 'calc', '--allow-host-execution')
+        self.assertEqual(self.nest(root, env, *ask, 'Fix addition').returncode, 2)
+        first = next(runs.iterdir())
+        again = self.nest(root, env, *ask, 'Fix addition')
+        self.assertEqual(again.returncode, 2, again.stdout + again.stderr)
+        self.assertIn(f'run={first.name}', again.stdout)
+        self.assertIn('1. Should add accept floats?', again.stdout)
+        self.assertEqual(len(list(runs.iterdir())), 1, 'an unchanged request starts no agents')
+        answered = 'Fix addition\n\nOwner answers:\n1. Should add accept floats? - no'
+        p = self.nest(root, env, *ask, answered)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn(f'explore: reusing run {first.name}', p.stdout)
+        second = next(d for d in runs.iterdir() if d != first)
+        stages = {f.name.split('_')[0] for f in (second / 'artifacts').glob('*.schema.json')}
+        self.assertEqual(stages, {'specify', 'plan'})
+        self.assertFalse((second / 'artifacts/baseline.json').exists())
+        self.assertEqual(json.loads((second / 'report.json').read_text())['reused_exploration'], first.name)
+        same = self.nest(root, env, *ask, answered)
+        self.assertEqual(same.returncode, 0, same.stdout + same.stderr)
+        self.assertIn(f'PLAN READY FOR APPROVAL (session=calc, run={second.name})', same.stdout)
+        self.assertEqual(len(list(runs.iterdir())), 2)
+        p = self.nest(root, env, 'run', '--from-plan', second.name, '--allow-host-execution')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        build = next(d for d in runs.iterdir() if d not in (first, second))
+        self.assertTrue((build / 'artifacts/baseline.json').exists(), 'a build checks the baseline itself')
+        for session, request in (('other', answered), ('calc', 'Fix addition again')):
+            fresh = self.nest(root, env, 'plan', '--session', session, '--allow-host-execution', request)
+            self.assertIn(fresh.returncode, (0, 2), fresh.stdout + fresh.stderr)
+            self.assertNotIn('reusing', fresh.stdout, (session, request))
 
     def test_each_stage_gets_its_configured_model_and_effort(self):
         root, env = self.feature_project('happy')

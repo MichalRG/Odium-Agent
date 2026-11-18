@@ -117,7 +117,7 @@ class NestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = {'limits': {'agent_timeout_seconds': 20}}
             payload = []
-            def fake_call(argv, cwd, timeout, input_text=None):
+            def fake_call(argv, cwd, timeout, input_text=None, **watch):
                 payload.append((argv, input_text))
                 final_index = argv.index('--output-last-message') + 1
                 Path(argv[final_index]).write_text(json.dumps({
@@ -643,6 +643,21 @@ class NestTests(unittest.TestCase):
         with_docs, without = calls
         self.assertEqual(with_docs[with_docs.index('--add-dir') + 1], '/owner/docs')
         self.assertNotIn('--add-dir', without)
+
+    def test_agent_output_reaches_its_log_while_it_runs_and_after_a_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'plan_01'
+            script = 'import sys,time; print("step 1", flush=True); print("warn", file=sys.stderr, flush=True); time.sleep(30)'
+            with self.assertRaises(nest.TimedOut):
+                nest.call([sys.executable, '-c', script], Path(tmp), 2, log=log)
+            self.assertEqual(log.with_suffix('.stdout.log').read_text(), 'step 1\n')
+            self.assertEqual(log.with_suffix('.stderr.log').read_text(), 'warn\n')
+            done = nest.call([sys.executable, '-c', 'print(input())'], Path(tmp), 20, input_text='hi\n', log=log)
+            self.assertEqual((done.stdout, done.stderr), ('hi\n', ''))
+        stream = '\n'.join(json.dumps(e) for e in ({'type': 'system'}, {'type': 'result', 'structured_output': {'a': 1}},
+                                                     {'type': 'rate_limit_event'}))
+        self.assertEqual(json.loads(nest.claude_result(stream))['structured_output'], {'a': 1})
+        self.assertEqual(nest.claude_result('{"structured_output": {}}'), '{"structured_output": {}}')
 
     def test_provider_retries_a_lost_connection_but_not_a_real_failure(self):
         answer = {'summary': 'ok', 'relevant_files': [], 'risks': [], 'observations': [], 'context_pack': {'outline': '', 'excerpts': []}}

@@ -345,18 +345,25 @@ def dev_server(tree: Path, browser: dict, log: Path):
 
 
 def call(argv: list[str], cwd: Path, timeout: int = 600, input_text: str | None = None,
-         progress=None, max_timeout: int = 0) -> subprocess.CompletedProcess:
+         progress=None, max_timeout: int = 0, log: Path | None = None) -> subprocess.CompletedProcess:
     """Use stdin and kill the whole process group when a command times out.
+
+    With `log`, the output goes to `<log>.stdout.log` and `<log>.stderr.log` while the command runs,
+    so that the owner can follow it, and stays there after a timeout.
 
     With `progress`, a command still running after a `timeout` window gets another window
     while `progress()` is true, up to `max_timeout` seconds in total.
 
     Security note: process groups are not a sandbox. Run in a disposable runner.
     """
+    logs = (log.with_suffix('.stdout.log'), log.with_suffix('.stderr.log')) if log else None
     try:
-        proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors='replace',
-                                env={**os.environ, 'CI': 'true'}, start_new_session=(os.name == 'posix'))
+        with contextlib.ExitStack() as files:
+            out, err = ([files.enter_context(path.open('w', encoding='utf-8')) for path in logs] if logs
+                        else (subprocess.PIPE, subprocess.PIPE))
+            proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                                    stdout=out, stderr=err, text=True, errors='replace',
+                                    env={**os.environ, 'CI': 'true'}, start_new_session=(os.name == 'posix'))
     except OSError as ex:
         raise Blocked(f'Cannot launch executable {argv[0]}: {ex}') from ex
     elapsed, window, send = 0, timeout, input_text
@@ -364,6 +371,8 @@ def call(argv: list[str], cwd: Path, timeout: int = 600, input_text: str | None 
         while True:
             try:
                 out, err = proc.communicate(input=send, timeout=window)
+                if logs:
+                    out, err = (path.read_text(encoding='utf-8', errors='replace') for path in logs)
                 return subprocess.CompletedProcess(argv, proc.returncode, out, err)
             except subprocess.TimeoutExpired as ex:
                 elapsed += window
@@ -809,6 +818,15 @@ def copilot_answer(jsonl: str) -> str:
     return answer
 
 
+def claude_result(stream: str) -> str:
+    """The result event of Claude Code's stream-json output, or the whole text for plain JSON output."""
+    for line in reversed(stream.splitlines()):
+        with contextlib.suppress(ValueError):
+            if isinstance(event := json.loads(line), dict) and event.get('type') == 'result':
+                return line
+    return stream
+
+
 def json_tail(text: str) -> str:
     """The JSON object that ends `text`, without the prose or code fence a model may put around it."""
     decoder = json.JSONDecoder()
@@ -901,11 +919,17 @@ class CLIProvider:
         # A writing agent that keeps changing files gets more time, window by window, up to a cap.
         watch = {'progress': worktree_progress(cwd),
                  'max_timeout': int(limits.get('agent_max_seconds', 14400))} if write else {}
+        stdout_log = prefix.with_suffix('.stdout.log')
+        stderr_log = prefix.with_suffix('.stderr.log')
+        watch['log'] = prefix
+        for path in (stdout_log, stderr_log):  # numbers the next attempt, and tail -f can start at once
+            path.touch()
+        print(f'[AI Nest] {stage}: follow it with tail -f {stdout_log}', flush=True)
         if self.name == 'codex':
             sf = prefix.with_suffix('.schema.json')
             final = prefix.with_suffix('.answer.json')
             write_json(sf, schema)
-            argv = ['codex', 'exec', *self.model_args(stage), '--sandbox',
+            argv = ['codex', 'exec', *self.model_args(stage), '--json', '--sandbox',
                     'workspace-write' if write else 'read-only',
                     # Scaffolding runs package managers (uv, npm), which need the registry.
                     *(['-c', 'sandbox_workspace_write.network_access=true'] if stage in ('bootstrap', 'browser') else []),
@@ -934,13 +958,9 @@ class CLIProvider:
                     '--setting-sources', 'project', '--strict-mcp-config',
                     '--tools', tools, '--allowedTools', tools,
                     '--permission-mode', 'dontAsk',
-                    '--output-format', 'json', '--json-schema', json.dumps(schema)]
+                    '--output-format', 'stream-json', '--verbose', '--json-schema', json.dumps(schema)]
             p = call(argv, cwd, timeout, input_text=prompt, **watch)
-            raw = p.stdout
-        stdout_log = prefix.with_suffix('.stdout.log')
-        stderr_log = prefix.with_suffix('.stderr.log')
-        stdout_log.write_text(p.stdout[-150000:], encoding='utf-8')
-        stderr_log.write_text(p.stderr[-150000:], encoding='utf-8')
+            raw = claude_result(p.stdout)
         if p.returncode != 0:
             # Only the end of the output: the start can hold the agent's own command output.
             lost = TRANSIENT_PROVIDER_ERROR.search(p.stdout[-3000:] + p.stderr[-3000:])

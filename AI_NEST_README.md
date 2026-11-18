@@ -268,6 +268,8 @@ Skill invocation: Codex `$build-feature ...`, Claude Code `/build-feature ...`, 
   gotchas/<repository-slug>.json
 ```
 
+**Watch a stage.** Each agent stage prints its log when it starts: `[AI Nest] plan: follow it with tail -f <run>/artifacts/plan_01.stdout.log`. The agent writes there while it runs, one JSON event per line: its messages, tool calls and command output (Claude Code `stream-json`, `codex exec --json`, Copilot JSON). The next line names the model and effort. The log stays after a timeout or a failure.
+
 Agents return machine-readable reports; orchestrator writes session records and controls who receives previous findings. Protected test notes are not injected into coder context.
 
 **Gotchas** are the memory that outlives a session. When an agent reports an observation of kind `gotcha` (a trap in the project that the code does not show, such as a check that needs an environment variable), the orchestrator keeps it in `gotchas/<repository-slug>.json`. Every stage of every later session of that repository gets the gotchas as `nest_session.project_gotchas`, marked as untrusted leads. The same gotcha reported again replaces the old entry and counts up `seen`. The file keeps the last 40. Gotchas from the protected test stage are not kept. Edit or delete the file to correct the list; put facts that you have checked in the reference docs instead. Raw protected logs are stored on the host and must be access-controlled at OS/storage level.

@@ -70,7 +70,7 @@ elif '# Role: specification writer' in prompt:
              'constraints':[],'open_questions':[]}
 elif '# Role: planner' in prompt:
     payload={'tasks':[{'id':'T-1','description':'correct add','files':['calc.py']}],
-             'testing_strategy':'unit','risks':[],'commits':[{'message':'Correct add','tasks':['T-1']}],'test_changes':[],'browser_checks':[]}
+             'testing_strategy':'unit','risks':[],'commits':[{'message':'Correct add','tasks':['T-1']}],'test_changes':[],'browser_checks':[],'test_cases':[]}
 elif '# Role: test-engineer — PUBLIC' in prompt:
     (base/'tests/test_feature.py').write_text(
         'import unittest\\nfrom calc import add\\nclass TestAdd(unittest.TestCase):\\n'

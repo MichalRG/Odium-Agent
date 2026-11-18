@@ -42,8 +42,10 @@ elif '# Role: planner' in prompt:
     result = {'tasks':[{'id':'T1','description':'correct add','files':['calcx.py' if scenario == 'red_new_module' else 'calc.py']}], 'testing_strategy':'unit','risks':[],
               'commits':[{'message':'Correct add','tasks':['T1']}],
               'test_changes':[{'file':'tests/test_existing.py','reason':'test_zero must also cover add(0,1)'}] if scenario == 'test_change' else [],
-              'browser_checks':['Open the page; it lists calc.py'] if scenario.startswith('browser') else []}
+              'browser_checks':['Open the page; it lists calc.py'] if scenario.startswith('browser') else [],
+              'test_cases':[{'behaviour':'add(1, 2) returns 3','criterion':'AC1','level':'unit'}]}
 elif '# Role: test-engineer — PUBLIC' in prompt:
+    assert 'add(1, 2) returns 3' in prompt  # the approved test cases reach the test engineer
     if scenario == 'red_invalid':
         body = 'import totally_missing_dependency_123\n'
         expected = ['test_add']
@@ -151,6 +153,11 @@ elif '# Role: browser tester' in prompt:
               'findings': [] if ok else [{'severity':'high','file':'/','problem':'items on the sea','evidence':'open /'}],
               'scenarios': [{'scenario':'Open the page; it lists calc.py','passed':ok,'evidence':'saw calc.py',
                              'screenshot':str(shots / '1-page.png')}]}
+elif '# Role: test auditor' in prompt:
+    assert '"public_test_files": [' in prompt and 'tests/test_feature.py' in prompt and 'Fix addition' in prompt
+    result = {'summary': 'add is covered; negative numbers are not',
+              'gaps': [{'flow': 'add with negative numbers', 'why': 'callers pass debts', 'suggested_test': 'unit: add(-1, -2) returns -3'}],
+              'excess': []}
 elif '# Role: code-reviewer' in prompt or '# Role: security-reviewer' in prompt:
     result = {'approved':True,'findings':[],'summary':'approved'}
     earlier_reviews = Path(args[args.index('--output-last-message') + 1]).parent.glob('review_*.answer.json')
@@ -213,6 +220,7 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertIn('PLAN READY FOR APPROVAL', p.stdout)
         self.assertIn('T1: correct add [calc.py]', p.stdout)
+        self.assertIn('  - [unit] add(1, 2) returns 3 (AC1)', p.stdout)
         plan_report = json.loads(next((root / '.ai-nest/runs').glob('*/report.json')).read_text())
         self.assertEqual(plan_report['status'], 'planned')
         # Nothing to review yet: no branch or worktree is left behind.
@@ -407,20 +415,46 @@ class EndToEndTests(unittest.TestCase):
         stages = sorted(f.name.split('.')[0] for f in (run_dir / 'artifacts').glob('*.schema.json'))
         self.assertEqual([s for s in stages if s.startswith(('implement', 'repair'))], ['implement_01', 'repair_01'])
 
-    def test_diff_over_the_configured_review_limit_blocks_instead_of_truncating(self):
+    def review_limit_run(self, limit):
         root, env = self.feature_project('happy')
         cfg = json.loads((root / 'nest.config.json').read_text())
-        cfg['limits']['review_diff_max_chars'] = 100
+        cfg['limits']['review_diff_max_chars'] = limit
         (root / 'nest.config.json').write_text(json.dumps(cfg))
         self.assertEqual(cmd(root, 'git', 'commit', '-qam', 'tiny review limit').returncode, 0)
         p = self.nest(root, env, 'run', '--provider', 'codex', '--session', 'calc',
                       '--allow-host-execution', 'Fix addition')
-        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         run_dir = next((root / '.ai-nest/runs').iterdir())
-        report = json.loads((run_dir / 'report.json').read_text())
+        return p, json.loads((run_dir / 'report.json').read_text()), run_dir
+
+    def test_a_file_diff_over_the_review_limit_blocks_instead_of_truncating(self):
+        p, report, run_dir = self.review_limit_run(100)
+        self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertEqual(report['status'], 'blocked')
-        self.assertRegex(report['error'], r'Diff exceeds the review limit: \d+ characters, limit 100')
+        self.assertRegex(report['error'], r'The diff of \S+ alone has \d+ characters, over the review limit of 100')
         self.assertFalse(list((run_dir / 'artifacts').glob('review_*')), 'no reviewer may see a cut diff')
+
+    def test_a_diff_over_the_review_limit_is_reviewed_in_parts_of_whole_files(self):
+        p, report, run_dir = self.review_limit_run(350)  # each file fits, both together do not
+        self.assertEqual((p.returncode, report['status']), (0, 'verified'), p.stdout + p.stderr)
+        self.assertIn('it is reviewed in 2 parts', p.stdout)
+        prompts = [json.loads(f.read_text()) for f in sorted((run_dir / 'artifacts').glob('review_*.answer.json'))]
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(report['review']['summary'].startswith('Part 1: '))
+
+    def test_test_audit_reviews_the_tests_of_the_session_slices(self):
+        root, env = self.feature_project('happy')
+        none = self.nest(root, env, 'audit-tests', '--provider', 'codex', '--session', 'calc')
+        self.assertEqual(none.returncode, 1)
+        self.assertIn('no verified feature run to audit', none.stderr)
+        p = self.nest(root, env, 'run', '--provider', 'codex', '--session', 'calc', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        audit = self.nest(root, env, 'audit-tests', '--provider', 'codex', '--session', 'calc')
+        self.assertEqual(audit.returncode, 0, audit.stdout + audit.stderr)
+        self.assertIn('TEST AUDIT (session=calc, 1 verified slices)', audit.stdout)
+        self.assertIn('  - add with negative numbers: callers pass debts', audit.stdout)
+        report = json.loads(next((root / '.ai-nest/audits').glob('*/report.json')).read_text())
+        self.assertEqual(report['gaps'][0]['suggested_test'], 'unit: add(-1, -2) returns -3')
+        self.assertNotIn('audits', cmd(root, 'git', 'worktree', 'list').stdout, 'the audit checkout is removed')
 
     def test_review_findings_go_back_to_the_coder_after_approval(self):
         root, env = self.feature_project('review_findings')

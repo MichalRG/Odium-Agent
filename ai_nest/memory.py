@@ -53,6 +53,8 @@ class SessionStore:
         'review': ('explore', 'specify', 'plan', 'tests', 'implement', 'repair', 'bootstrap', 'review'),
         'security_review': ('explore', 'specify', 'plan', 'implement', 'repair', 'bootstrap', 'review', 'security_review'),
         'browser': ('browser',),  # it judges the running app, like a user, without the code's history
+        'curate': (),
+        'test_audit': ('specify', 'plan', 'tests', 'review'),
     }
 
     GOTCHA_LIMIT = 40
@@ -65,6 +67,9 @@ class SessionStore:
         self.root = repo / '.ai-nest' / 'sessions' / self.slug
         # Gotchas outlive sessions; one file per repository, so the repositories of a workspace do not mix.
         self.gotchas_file = repo / '.ai-nest' / 'gotchas' / f'{session_slug(project or repo.name)}.json'
+        # Gotchas that leave the list (over the limit, merged or outdated) stay readable here.
+        self.archive_file = self.gotchas_file.with_suffix('.archive.json')
+        self.new_gotchas = 0
         manifest = self.root / 'session.json'
         if manifest.exists():
             existing = json.loads(manifest.read_text(encoding='utf-8'))
@@ -129,6 +134,8 @@ class SessionStore:
             return
         # shortcut: read-modify-write without a lock; two runs that finish together can lose one entry.
         known = self.gotchas()
+        if stage == 'browser':  # every attempt checks the same scenarios; keep what the last one learned
+            known = [g for g in known if (g.get('run_id'), g.get('stage')) != (self.run_id, 'browser')]
         for f in found:
             entry = {k: str(f.get(k, ''))[:500] for k in ('summary', 'evidence', 'file', 'suggested_action')}
             key = ' '.join(entry['summary'].lower().split())
@@ -138,7 +145,39 @@ class SessionStore:
             known.append({**entry, 'session': self.name, 'run_id': self.run_id, 'stage': stage,
                           'base_commit': self.base_commit, 'seen': int((old or {}).get('seen', 0)) + 1,
                           'timestamp': _now()})
+        self.new_gotchas += len(found)
+        self._archive(known[:-self.GOTCHA_LIMIT], f'over the limit of {self.GOTCHA_LIMIT}')
         _atomic_json(self.gotchas_file, {'version': 1, 'gotchas': known[-self.GOTCHA_LIMIT:]})
+
+    def _archive(self, entries: list[dict], reason: str = '') -> None:
+        if not entries:
+            return
+        try:
+            archived = json.loads(self.archive_file.read_text(encoding='utf-8')).get('gotchas', [])
+        except (OSError, ValueError, AttributeError):
+            archived = []
+        archived += [{**g, 'archived': _now(), 'reason': g.get('reason') or reason} for g in entries]
+        _atomic_json(self.archive_file, {'version': 1, 'gotchas': archived})
+
+    def curate_gotchas(self, before: list[dict], curation: dict) -> bool:
+        """Apply a curation of the list `before`. Change nothing and return False unless it places every entry once."""
+        merged = [g['merged_from'] for g in curation['gotchas']]
+        placed = [i for ids in merged for i in ids] + [a['index'] for a in curation['archived']]
+        if sorted(placed) != list(range(len(before))) or not all(merged):
+            return False
+        kept, archived = [], [{**before[a['index']], 'reason': a['reason'][:300]} for a in curation['archived']]
+        for g in curation['gotchas']:
+            sources = [before[i] for i in g['merged_from']]
+            text = {k: str(g[k])[:500] for k in ('summary', 'evidence', 'file', 'suggested_action')}
+            kept.append({**max(sources, key=lambda x: x.get('timestamp', '')), **text,
+                         'seen': sum(int(x.get('seen', 1)) for x in sources)})
+            if len(sources) > 1:
+                archived += [{**x, 'reason': f'merged into: {text["summary"][:200]}'} for x in sources]
+        # Entries that another run added while the curation ran stay as they are.
+        later = [g for g in self.gotchas() if g not in before]
+        self._archive(archived)
+        _atomic_json(self.gotchas_file, {'version': 1, 'gotchas': sorted(kept, key=lambda g: g.get('timestamp', '')) + later})
+        return True
 
     def _records(self) -> list[dict]:
         result = []

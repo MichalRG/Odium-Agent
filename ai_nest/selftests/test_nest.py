@@ -168,7 +168,7 @@ class NestTests(unittest.TestCase):
 
     def test_plan_commits_must_list_every_task_exactly_once(self):
         plan = {'tasks': [{'id': 'T1', 'description': 'a', 'files': []}, {'id': 'T2', 'description': 'b', 'files': []}],
-                'testing_strategy': 'unit', 'risks': [], 'test_changes': [], 'browser_checks': [], 'observations': []}
+                'testing_strategy': 'unit', 'risks': [], 'test_changes': [], 'browser_checks': [], 'test_cases': [], 'observations': []}
         for commits in ([{'message': 'A', 'tasks': ['T1']}],
                         [{'message': 'A', 'tasks': ['T1', 'T2']}, {'message': 'B', 'tasks': ['T2']}],
                         [{'message': 'A', 'tasks': ['T1', 'T2', 'T3']}]):
@@ -356,7 +356,7 @@ class NestTests(unittest.TestCase):
                     if stage == 'plan':
                         return {'tasks': [{'id': 't1', 'description': 'fix add', 'files': ['calc.py']}],
                                 'commits': [{'message': 'Fix add', 'tasks': ['t1']}],
-                                'testing_strategy': 'unit tests', 'risks': [], 'test_changes': [], 'browser_checks': [], 'observations': [note]}
+                                'testing_strategy': 'unit tests', 'risks': [], 'test_changes': [], 'browser_checks': [], 'test_cases': [], 'observations': [note]}
                     if stage == 'tests':
                         self_ref = cwd / 'tests' / 'test_feature.py'
                         self_ref.write_text('import unittest\nfrom calc import add\n'
@@ -452,6 +452,99 @@ class NestTests(unittest.TestCase):
             self.assertEqual([(g['summary'], g['seen']) for g in later['project_gotchas']], [(' tests need  tz=utc', 2)])
             elsewhere = SessionStore(home, 'third', '20261108-120003-jkl', 'sha3', project='web')
             self.assertEqual(elsewhere.handoff_context('implement')['project_gotchas'], [])
+
+    def test_gotchas_leave_the_list_only_into_the_archive(self):
+        from memory import SessionStore
+        def trap(summary):
+            return {'kind': 'gotcha', 'severity': 'info', 'summary': summary, 'evidence': 'e', 'file': 'f',
+                    'suggested_action': 'a'}
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            store = SessionStore(home, 'map', '20261118-100000-aaaaaaa', 'sha', project='calc')
+            store.GOTCHA_LIMIT = 3
+            store.record('browser', {'summary': 's', 'observations': [trap('click recipe, try 1')]}, attempt=1)
+            store.record('browser', {'summary': 's', 'observations': [trap('click recipe, try 2')]}, attempt=2)
+            self.assertEqual([g['summary'] for g in store.gotchas()], ['click recipe, try 2'])
+            store.record('implement', {'summary': 's', 'observations': [trap('A'), trap('A again'), trap('B')]})
+            self.assertEqual([g['summary'] for g in store.gotchas()], ['A', 'A again', 'B'])
+            archive = json.loads(store.archive_file.read_text())['gotchas']
+            self.assertEqual([(g['summary'], g['reason']) for g in archive], [('click recipe, try 2', 'over the limit of 3')])
+
+            before = store.gotchas()
+            bad = {'gotchas': [{'merged_from': [0], 'summary': 'A', 'evidence': 'e', 'file': 'f', 'suggested_action': 'a'}],
+                   'archived': [{'index': 2, 'reason': 'gone'}]}
+            self.assertFalse(store.curate_gotchas(before, bad), 'index 1 is placed nowhere')
+            self.assertEqual(store.gotchas(), before)
+            curation = {'gotchas': [{'merged_from': [0, 1], 'summary': 'A, with the exact command', 'evidence': 'e',
+                                     'file': 'f', 'suggested_action': 'a'}],
+                        'archived': [{'index': 2, 'reason': 'B.py no longer exists'}]}
+            store.record('review', {'summary': 's', 'findings': [], 'observations': []})
+            other = SessionStore(home, 'other', '20261118-100001-bbbbbbb', 'sha', project='calc')
+            other.GOTCHA_LIMIT = 9
+            other.record('tests', {'summary': 's', 'observations': [trap('C, added meanwhile')]})
+            self.assertTrue(store.curate_gotchas(before, curation))
+            self.assertEqual([(g['summary'], g['seen']) for g in store.gotchas()],
+                             [('A, with the exact command', 2), ('C, added meanwhile', 1)])
+            reasons = {g['summary']: g['reason'] for g in json.loads(store.archive_file.read_text())['gotchas']}
+            self.assertEqual(reasons['B'], 'B.py no longer exists')
+            self.assertTrue(reasons['A again'].startswith('merged into: A, with the exact command'))
+
+    def test_gotcha_curation_runs_only_after_a_run_that_grew_a_long_list(self):
+        from memory import SessionStore
+        trap = {'kind': 'gotcha', 'severity': 'info', 'evidence': 'e', 'file': 'f', 'suggested_action': 'a'}
+        with tempfile.TemporaryDirectory() as tmp, patch('builtins.print'):
+            home = Path(tmp)
+            store = SessionStore(home, 'map', '20261118-100000-aaaaaaa', 'sha', project='calc')
+            answer = lambda n: {'summary': 's', 'archived': [], 'observations': [], 'gotchas': [
+                {'merged_from': [i], 'summary': f'g{i}', 'evidence': 'e', 'file': 'f', 'suggested_action': 'a'} for i in range(n)]}
+            with patch.object(nest, 'agent_stage', side_effect=lambda *a, **k: answer(len(a[4]['gotchas']))) as stage:
+                store.record('implement', {'summary': 's', 'observations': [{**trap, 'summary': f'g{i}'} for i in range(20)]})
+                nest.curate_gotchas(None, store, home)
+                self.assertFalse(stage.called, '20 gotchas are not a long list yet')
+                store.record('implement', {'summary': 's', 'observations': [{**trap, 'summary': 'g20'}]})
+                nest.curate_gotchas(None, store, home)
+                self.assertEqual(stage.call_args.args[2], 'curate')
+                later = SessionStore(home, 'map', '20261118-100001-bbbbbbb', 'sha', project='calc')
+                nest.curate_gotchas(None, later, home)
+                self.assertEqual(stage.call_count, 1, 'a run that added no gotcha does not curate')
+
+    def test_sweep_removes_worktrees_of_finished_runs_only(self):
+        from memory import SessionStore
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            git(repo, 'init', '-q')
+            (repo / 'nest.config.json').write_text('{}')
+            (repo / '.gitignore').write_text('.ai-nest/\n')
+            git(repo, 'add', '.')
+            git(repo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base')
+            base = git(repo, 'rev-parse', 'HEAD').strip()
+            runs = repo / '.ai-nest' / 'runs'
+
+            def run(run_id, status, result=True, changed=False):
+                root = runs / run_id
+                nest.checkout_worktree(repo, root / 'code', branch='ai-nest/' + run_id)
+                nest.checkout_worktree(repo, root / 'public-tests')
+                if changed:
+                    (root / 'code' / 'feature.py').write_text('x = 1\n')
+                session = SessionStore(repo, 'feature', run_id, base)
+                nest.write_json(root / 'report.json', {'status': status, 'session_id': session.slug,
+                                                       'branch': 'ai-nest/' + run_id, 'base_commit': base})
+                if result:
+                    session.record_result(status, root / 'report.json')
+                return root
+            planned = run('20261118-100000-aaaaaaa', 'planned')
+            kept_code = run('20261118-100001-bbbbbbb', 'verified', changed=True)
+            running = run('20261118-100002-ccccccc', 'running', result=False)
+            killed = run('20261118-100003-ddddddd', 'blocked', result=False)
+            removed = nest.sweep_worktrees(repo)
+            self.assertEqual(sorted(removed), sorted(str(p) for p in (
+                planned / 'code', planned / 'public-tests', kept_code / 'public-tests')))
+            self.assertTrue((kept_code / 'code' / 'feature.py').is_file(), 'unmerged verified code stays')
+            self.assertTrue((running / 'code').is_dir() and (killed / 'public-tests').is_dir())
+            self.assertTrue((planned / 'report.json').is_file(), 'reports stay')
+            branches = git(repo, 'branch', '--list', 'ai-nest/*')
+            self.assertNotIn('aaaaaaa', branches)
+            self.assertIn('bbbbbbb', branches)
 
     def test_upgrade_preserves_configuration_and_existing_instructions(self):
         import importlib.util

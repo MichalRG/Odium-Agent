@@ -61,13 +61,21 @@ _STAGE_FIELDS = {
     'plan': {'tasks': _list_of(_obj({'id': _STRING, 'description': _STRING, 'files': _STRINGS})),
              'testing_strategy': _STRING, 'risks': _STRINGS,
              'commits': _list_of(_obj({'message': _STRING, 'tasks': _STRINGS})),
-             'test_changes': _list_of(_obj({'file': _STRING, 'reason': _STRING})), 'browser_checks': _STRINGS},
+             'test_changes': _list_of(_obj({'file': _STRING, 'reason': _STRING})), 'browser_checks': _STRINGS,
+             'test_cases': _list_of(_obj({'behaviour': _STRING, 'criterion': _STRING, 'level': _STRING}))},
     'tests': {**_CHANGE, 'expected_red_tests': _STRINGS, 'coder_guidance': _STRINGS,
               'test_strategy': _obj({level: _STRINGS for level in ('unit', 'integration', 'contract', 'e2e', 'smoke')})},
     'protected_tests': _CHANGE, 'implement': _CHANGE, 'bootstrap': _CHANGE, 'repair': _CHANGE,
     'review': _VERDICT, 'security_review': _VERDICT,
     'browser': {**_VERDICT, 'scenarios': _list_of(_obj({'scenario': _STRING, 'passed': {'type': 'boolean'},
                                                         'evidence': _STRING, 'screenshot': _STRING}))},
+    'curate': {'summary': _STRING,
+               'gotchas': _list_of(_obj({'merged_from': _list_of(_INTEGER), 'summary': _STRING, 'evidence': _STRING,
+                                         'file': _STRING, 'suggested_action': _STRING})),
+               'archived': _list_of(_obj({'index': _INTEGER, 'reason': _STRING}))},
+    'test_audit': {'summary': _STRING,
+                   'gaps': _list_of(_obj({'flow': _STRING, 'why': _STRING, 'suggested_test': _STRING})),
+                   'excess': _list_of(_obj({'file': _STRING, 'test': _STRING, 'reason': _STRING}))},
 }
 # Strict JSON Schemas: Codex and Claude enforce them, parse_result enforces them for every provider.
 SCHEMAS = {stage: _obj({**fields, 'observations': _list_of(_OBSERVATION)}) for stage, fields in _STAGE_FIELDS.items()}
@@ -764,6 +772,44 @@ def remove_worktree(source: Path, location: Path) -> None:
         git(source, 'worktree', 'remove', '--force', str(location))
 
 
+def sweep_worktrees(repo: Path) -> list[str]:
+    """Remove the worktrees of finished runs whose result the session holds; return their paths.
+
+    A verified run keeps its `code` worktree while it holds unmerged changes. A run's report and
+    artifacts stay. A run without a session result (still running, or killed) keeps everything.
+    """
+    runs = (nest_home(repo) / '.ai-nest' / 'runs').resolve()
+    sessions = nest_home(repo) / '.ai-nest' / 'sessions'
+    removed = []
+    listing = git(repo, 'worktree', 'list', '--porcelain')
+    for path in (Path(line[9:]) for line in listing.splitlines() if line.startswith('worktree ')):
+        if not is_inside(path, runs) or path.parent.parent != runs:
+            continue
+        report_file = path.parent / 'report.json'
+        try:
+            report = json.loads(report_file.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        result = sessions / str(report.get('session_id')) / 'runs' / path.parent.name / 'result.json'
+        if report.get('status') in (None, 'running') or not result.is_file() or not path.is_dir():
+            continue  # a folder that is already gone is left to `git worktree prune`
+        try:
+            if path.name == 'code' and report.get('status') == 'verified' \
+                    and git(path, 'status', '--porcelain', timeout=600).strip():
+                continue
+            # Twice --force: a worktree that a killed `git worktree add` left locked is removed too.
+            git(repo, 'worktree', 'remove', '--force', '--force', str(path), timeout=600)
+            removed.append(str(path))
+            branch = report.get('branch')
+            if path.name == 'code' and branch and git(repo, 'branch', '--list', branch).strip() \
+                    and git(repo, 'rev-parse', branch) == report.get('base_commit'):
+                git(repo, 'branch', '-D', branch)  # it holds no commit of its own
+        except Blocked as ex:
+            print(f'Warning: could not remove {path}: {ex}', file=sys.stderr)
+    git(repo, 'worktree', 'prune')
+    return removed
+
+
 def apply_patch(repo: Path, patch: Path) -> None:
     with patch.open('r', encoding='utf-8') as f:
         content = f.read()
@@ -993,6 +1039,40 @@ def agent_stage(provider: CLIProvider, session: SessionStore, stage: str,
     return result
 
 
+def diff_parts(tree: Path, limit: int, pathspec: list[str]) -> list[tuple[list[str], str]]:
+    """The diff against HEAD as (files, diff) parts of at most `limit` characters; a file is never split."""
+    names = [n for n in call(['git', 'diff', '-z', '--name-only', 'HEAD', '--', *pathspec], tree).stdout.split('\0') if n]
+    parts: list[tuple[list[str], str]] = []
+    for name in names:
+        text = call(['git', 'diff', '--binary', 'HEAD', '--', name], tree).stdout
+        if len(text) > limit:
+            raise Unrepairable(f'The diff of {name} alone has {len(text)} characters, over the review limit of {limit} '
+                               '(limits.review_diff_max_chars). A diff is never truncated; raise the limit.')
+        if parts and len(parts[-1][1]) + len(text) <= limit:
+            parts[-1] = (parts[-1][0] + [name], parts[-1][1] + text)
+        else:
+            parts.append(([name], text))
+    return parts
+
+
+GOTCHA_CURATION_SIZE = 20
+
+
+def curate_gotchas(provider: CLIProvider, session: SessionStore, repo: Path) -> None:
+    """After a run that added gotchas to a long list, a cheap agent merges duplicates and archives outdated ones."""
+    before = session.gotchas()
+    if not session.new_gotchas or len(before) <= GOTCHA_CURATION_SIZE:
+        return
+    listed = [{'index': i, **{k: g.get(k, '') for k in ('summary', 'evidence', 'file', 'suggested_action', 'seen', 'timestamp')}}
+              for i, g in enumerate(before)]
+    curation = agent_stage(provider, session, 'curate', repo, {'gotchas': listed})
+    if session.curate_gotchas(before, curation):
+        print(f'[AI Nest] gotchas: {len(before)} -> {len(session.gotchas())}; '
+              f'merged and outdated ones are kept in {session.archive_file}', flush=True)
+    else:
+        print('[AI Nest] gotchas unchanged: the curation did not place every entry exactly once', flush=True)
+
+
 def security_paths(files: list[str], cfg: dict, *, approved_new_test_fixtures: set[str] | None = None) -> None:
     # Whitelist applies ONLY to new fixtures validated as test-agent additions.
     # The coder never receives this exception; ordinary CI verify also does not.
@@ -1072,7 +1152,7 @@ def blocking_findings(review: dict, cfg: dict) -> list[dict]:
 
 def findings_to_fix(review: dict, cfg: dict) -> list[dict]:
     """Nonblocking findings the coder can act on: it may not edit tests or gate files."""
-    severities = cfg.get('review_policy', {}).get('fix_severities', ['medium', 'low'])
+    severities = cfg.get('review_policy', {}).get('fix_severities', ['medium'])
     return [f for f in review['findings'] if f['severity'].lower() in severities
             and not is_test_file(f['file'].split(':')[0], cfg)
             and not is_blocked_file(f['file'].split(':')[0], cfg)]
@@ -1292,6 +1372,9 @@ def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dic
     lines += [f'  {t["id"]}: {t["description"]} [{", ".join(t["files"])}]' for t in plan['tasks']]
     lines.append('Commits:')
     lines += [f'  {i}. {c["message"]} ({", ".join(c["tasks"])})' for i, c in enumerate(plan['commits'], 1)]
+    if plan.get('test_cases'):
+        lines.append(f'Test cases ({len(plan["test_cases"])}; the test engineer writes these, plus a few edge cases):')
+        lines += [f'  - [{c["level"]}] {c["behaviour"]} ({c["criterion"]})' for c in plan['test_cases']]
     if plan.get('test_changes'):
         lines.append('Existing tests to change (approving the plan allows the test engineer these edits):')
         lines += [f'  - {c["file"]}: {c["reason"]}' for c in plan['test_changes']]
@@ -1359,6 +1442,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         run_root / x for x in ('code', 'public-tests', 'protected-tests', 'verification', 'review'))
     summary['branch'], summary['worktree'] = branch, str(code_tree)
     write_json(run_root / 'report.json', summary)
+    provider = None
     try:
         provider = CLIProvider(provider_name, cfg, artifacts)
         checkout_worktree(repo, code_tree, branch=branch)
@@ -1606,21 +1690,41 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                         continue
                 before = git(review_tree, 'status', '--porcelain')
                 # Generated lockfiles would exhaust the review budget; they stay readable in the checkout.
-                public_diff = call(['git', 'diff', '--binary', 'HEAD', '--', '.',
-                                    *[f':(exclude,glob)**/{name}' for name in LOCKFILES]], review_tree).stdout
+                pathspec = ['.', *[f':(exclude,glob)**/{name}' for name in LOCKFILES]]
+                public_diff = call(['git', 'diff', '--binary', 'HEAD', '--', *pathspec], review_tree).stdout
                 omitted = [f for f in code_files if Path(f).name in LOCKFILES]
-                # The reviewer gets the whole diff inline; a truncated diff would pass unreviewed code.
+                # The reviewer gets the whole diff inline, never truncated: a large one comes in parts of whole files.
                 review_limit = int(cfg.get('limits', {}).get('review_diff_max_chars', 400000))
-                if len(public_diff) > review_limit:
-                    raise Unrepairable(f'Diff exceeds the review limit: {len(public_diff)} characters, limit {review_limit} '
-                                  '(limits.review_diff_max_chars). The diff is never truncated; split the feature '
-                                  'into smaller slices or raise the limit.')
-                review = agent_stage(provider, session, 'review', review_tree,
-                                     {'request': request, 'specification': spec, 'plan': plan,
-                                      **({'context_pack': pack} if pack else {}),
-                                      'diff': public_diff, 'lockfiles_omitted_from_diff': omitted,
-                                      'verification_passed': True,
-                                      'base_commit': base_commit}, attempt=attempt)
+                parts = [([], public_diff)] if len(public_diff) <= review_limit else \
+                    diff_parts(review_tree, review_limit, pathspec)
+                if len(parts) > 1:
+                    print(f'[AI Nest] the diff has {len(public_diff)} characters; '
+                          f'it is reviewed in {len(parts)} parts', flush=True)
+
+                def reviewed(stage: str, extra: dict) -> dict:
+                    answers = []
+                    for number, (files, diff) in enumerate(parts, 1):
+                        part = {} if len(parts) == 1 else {'review_part': {
+                            'part': number, 'of': len(parts), 'files_in_this_part': files,
+                            'files_in_other_parts': [f for other, _ in parts if other is not files for f in other]}}
+                        answers.append(agent_stage(provider, session, stage, review_tree,
+                                                   {'request': request, 'specification': spec, 'plan': plan,
+                                                    **({'context_pack': pack} if pack else {}),
+                                                    'diff': diff, **part, 'lockfiles_omitted_from_diff': omitted,
+                                                    'verification_passed': True, **extra,
+                                                    'base_commit': base_commit}, attempt=attempt))
+                    if len(answers) == 1:
+                        return answers[0]
+                    merged = {'approved': all(a['approved'] for a in answers),
+                              'findings': [f for a in answers for f in a['findings']],
+                              'summary': ' '.join(f'Part {n}: {a["summary"]}' for n, a in enumerate(answers, 1)),
+                              'observations': [o for a in answers for o in a['observations']]}
+                    # The parts' gotchas are already kept; the session gets one handoff for the whole review.
+                    session.record(stage, {**merged, 'observations': [o for o in merged['observations']
+                                                                      if o['kind'] != 'gotcha']}, attempt=attempt)
+                    return merged
+
+                review = reviewed('review', {})
                 if git(review_tree, 'status', '--porcelain') != before:
                     raise Blocked('Reviewer changed repository files')
                 blockers = blocking_findings(review, cfg)
@@ -1641,12 +1745,7 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                                  'reason': reasons or ['No configured sensitive paths affected']})
                 session.record_routing(summary['agent_routing'])
                 if needs_sec:
-                    sec = agent_stage(provider, session, 'security_review', review_tree,
-                                      {'request': request, 'specification': spec, 'plan': plan,
-                                       **({'context_pack': pack} if pack else {}),
-                                       'diff': public_diff, 'lockfiles_omitted_from_diff': omitted,
-                                       'verification_passed': True,
-                                       'risk_reason': reasons, 'base_commit': base_commit}, attempt=attempt)
+                    sec = reviewed('security_review', {'risk_reason': reasons})
                     if git(review_tree, 'status', '--porcelain') != before:
                         raise Blocked('Security reviewer changed repository files')
                     sec_blockers = blocking_findings(sec, cfg)
@@ -1724,6 +1823,18 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 remove_worktree(repo, tree)
             except Blocked as ex:
                 print(f'Warning: could not remove {tree}: {ex}', file=sys.stderr)
+        if provider is not None:
+            try:
+                curate_gotchas(provider, session, repo)
+            except Blocked as ex:
+                print(f'Warning: gotchas not curated: {ex}', file=sys.stderr)
+        # Earlier runs too: a killed run or a failed removal leaves worktrees that slow every git command.
+        try:
+            swept = sweep_worktrees(repo)
+            if swept:
+                print(f'[AI Nest] removed {len(swept)} worktrees of finished runs; their reports stay', flush=True)
+        except Blocked as ex:
+            print(f'Warning: could not remove the worktrees of finished runs: {ex}', file=sys.stderr)
 
 def installation_diagnostics(repo: Path) -> list[str]:
     """Detect stale installed runtime pieces; not a sandbox or security trust root."""
@@ -1842,6 +1953,51 @@ def doctor(repo: Path, provider: str) -> int:
     return 0 if shutil.which(provider) and clean and not issues else 1
 
 
+def audit_tests(repo: Path, provider_name: str, session_name: str) -> int:
+    """At the end of a milestone: do the session's tests cover the important flows, without a pile of extras?"""
+    cfg = read_config(repo)
+    home = nest_home(repo) / '.ai-nest'
+    slug = session_slug(session_name)
+    slices = []
+    for report_file in sorted((home / 'runs').glob('*/report.json')):
+        with contextlib.suppress(OSError, ValueError):
+            report = json.loads(report_file.read_text(encoding='utf-8'))
+            if report.get('session_id') != slug or report.get('status') != 'verified' or report.get('mode') != 'feature':
+                continue
+            planning = home / 'runs' / str(report.get('approved_plan')) / 'artifacts' / 'planning.json'
+            plan = json.loads(planning.read_text(encoding='utf-8'))['plan'] if planning.is_file() else {}
+            slices.append({'run_id': report['run_id'], 'request': report['request'][-3000:],
+                           'acceptance_criteria': report.get('specification', {}).get('acceptance_criteria', []),
+                           'test_cases': plan.get('test_cases', []), 'public_test_files': report.get('public_test_files', []),
+                           'browser_checks': [s.get('scenario') for s in (report.get('browser_check') or {}).get('scenarios', [])]})
+    if not slices:
+        raise Blocked(f'Session {session_name!r} has no verified feature run to audit.')
+    head = git(repo, 'rev-parse', 'HEAD')
+    audit_id = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:7]
+    root = home / 'audits' / audit_id
+    (root / 'artifacts').mkdir(parents=True)
+    session = SessionStore(nest_home(repo), session_name, audit_id, head, project=repo.name)
+    tree = root / 'tree'
+    checkout_worktree(repo, tree)
+    try:
+        audit = agent_stage(CLIProvider(provider_name, cfg, root / 'artifacts'), session, 'test_audit', tree,
+                            {'session': session_name, 'slices': slices, 'base_commit': head})
+    finally:
+        remove_worktree(repo, tree)
+    write_json(root / 'report.json', {'audit_id': audit_id, 'session': session_name, 'base_commit': head,
+                                      'slices': [s['run_id'] for s in slices], **audit})
+    lines = [f'[AI Nest] TEST AUDIT (session={session_name}, {len(slices)} verified slices)', audit['summary']]
+    if audit['gaps']:
+        lines.append('Important flows without a test:')
+        lines += [f'  - {g["flow"]}: {g["why"]} Suggested test: {g["suggested_test"]}' for g in audit['gaps']]
+    if audit['excess']:
+        lines.append('Tests that add little:')
+        lines += [f'  - {e["file"]}: {e["test"]}: {e["reason"]}' for e in audit['excess']]
+    lines.append(f'Report: {root / "report.json"}')
+    print('\n'.join(lines), flush=True)
+    return 0
+
+
 def verify(repo: Path, base: str | None, allow_host: bool) -> int:
     if not allow_host:
         raise Blocked('Verification executes project code; pass --allow-host-execution only on a trusted, isolated runner.')
@@ -1878,10 +2034,10 @@ def verify(repo: Path, base: str | None, allow_host: bool) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description='Portable AI Engineering Nest')
     sub = parser.add_subparsers(dest='command', required=True)
-    for cmd in ('doctor', 'plan', 'run', 'bootstrap', 'verify', 'sessions'):
+    for cmd in ('doctor', 'plan', 'run', 'bootstrap', 'verify', 'sessions', 'audit-tests'):
         p = sub.add_parser(cmd)
         p.add_argument('--repo', default='.', help='Git repository root; in a workspace install, the repository folder inside it')
-        if cmd in ('doctor', 'plan', 'run', 'bootstrap'):
+        if cmd in ('doctor', 'plan', 'run', 'bootstrap', 'audit-tests'):
             p.add_argument('--provider', choices=PROVIDERS, default='codex')
         if cmd in ('plan', 'run', 'bootstrap', 'verify'):
             p.add_argument('--allow-host-execution', action='store_true',
@@ -1898,6 +2054,8 @@ def main() -> int:
         if cmd == 'run':
             p.add_argument('--from-plan', metavar='RUN_ID', default=None,
                            help='Implement the approved plan of this `plan` run (request and session come from it)')
+        if cmd == 'audit-tests':
+            p.add_argument('--session', required=True, help='The session whose verified slices form the milestone')
         if cmd == 'sessions':
             p.add_argument('action', choices=['list', 'show'])
             p.add_argument('name', nargs='?', help='Required for sessions show')
@@ -1906,7 +2064,7 @@ def main() -> int:
     args = parser.parse_args()
     repo = Path(args.repo).resolve()
     try:
-        if args.command in ('doctor', 'plan', 'run', 'bootstrap') and \
+        if args.command in ('doctor', 'plan', 'run', 'bootstrap', 'audit-tests') and \
                 call(['git', 'rev-parse', '--show-toplevel'], repo, 30).returncode:
             raise Blocked(f'{repo} is not a Git repository. AI Nest runs need Git: every stage works in a '
                           'worktree pinned to a commit. Run git init, make a first commit and rerun install.py '
@@ -1914,6 +2072,8 @@ def main() -> int:
                           'repositories) pass the repository folder: --repo <name>.')
         if args.command == 'doctor':
             return doctor(repo, args.provider)
+        if args.command == 'audit-tests':
+            return audit_tests(repo, args.provider, args.session)
         if getattr(args, 'request_file', None):
             if args.feature:
                 raise Blocked('Pass the request as text or with --request-file, not both.')

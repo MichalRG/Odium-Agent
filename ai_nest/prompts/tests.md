@@ -26,6 +26,26 @@ Each test protects a behaviour that the specification asks for. A test that stil
 - Do not write a temporary guard for a later slice, or a test whose only purpose is to make a future change fail.
 - A test must stay green when the code is refactored without a change in behaviour.
 
+## Before you return
+
+At base, the new modules do not exist yet, so the expected "module not found" errors hide every other error in a new test file. After the implementation exists, such an error breaks the whole test run, and the coder may not fix tests. So check each new test file before you return:
+
+- Read it as if the planned modules already existed with the planned names and signatures: it must compile, type-check under the test configuration and run on its own. Typical traps: a helper type whose name shadows a global or DOM type (`Event`, `Path`, `Node`, `Image`, `Text`, `Range`, `Element`); a field declared readonly or a const binding that is assigned later; a callback that reads a const while the call that initialises it is still running.
+- A test that asserts an absence (no button, no alert, no call) first asserts that the place it looks in exists and has the expected content, and it holds for the behaviour that already exists: scope it to what the new code does.
+- Compute every number that a test depends on (counts, sizes, limits) with the public function that defines it, never by hand, and derive limits from those values.
+- The tests in one file agree: no two tests require contradictory results for the same fixture or sequence, and tests of the same scheduler or throttle agree on when work runs.
+- Check each test in `expected_red_tests` against the code at base: a test that would pass at base is not expected RED.
+
+## Correcting tests
+
+With `test_fix`, the coder or the reviewer reported defects in your tests (`test_fix.defects`), with the failure when there was one (`test_fix.failure`). You do not see the production code. Check each defect against the specification and the planned test cases:
+
+- When the defect is real, fix it in the test with the smallest change.
+- Never weaken a valid assertion, and never change what a test checks to suit an implementation. When a reported defect is wrong, keep the test and say why in an observation of kind `decision`.
+- Return every public test file of this run in `files_modified`, as in the first round, and the same JSON fields.
+
+With `owner_notes`, follow the notes that the owner gave when approving the plan, within the plan.
+
 ## Required JSON
 
 - `summary`: what behavior the public tests cover.
@@ -33,6 +53,7 @@ Each test protects a behaviour that the specification asks for. A test that stil
 - `expected_red_tests`: test names exactly as defined in your test files (for example `test_add`, or an `it('...')` title); the RED runner output must show them failing. Missing-behavior tests should fail for intended behavior, not broken imports/fixtures/infrastructure. The orchestrator runs these commands and decides RED.
 - `coder_guidance`: public observable contracts, relevant fixtures, targeted run commands, expected failures and edge cases; **do not prescribe the production implementation**.
 - `test_strategy`: keys `unit`, `integration`, `contract`, `e2e`, `smoke`, each containing a list of selected cases (empty list when irrelevant). Smoke may reference cases at other levels.
+- `planned_case_tests`: for each entry of `plan.test_cases`, its number (`case`, counting from 1) and the names of the tests that cover it, exactly as the test files define them. The orchestrator checks that each case has tests and that the names are in the files. Empty when `plan.test_cases` is empty.
 - `observations`: evidence-backed discoveries, uncovered areas or risks.
 
 Never include protected tests, secret assertions or unpublished evaluator content in `coder_guidance`.

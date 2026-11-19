@@ -365,7 +365,7 @@ class NestTests(unittest.TestCase):
                         return {'summary': 'public acceptance test', 'files_modified': ['tests/test_feature.py'],
                                 'expected_red_tests': ['test_add'], 'coder_guidance': ['make add(1,2) == 3'],
                                 'test_strategy': {'unit': ['test_add'], 'integration': [], 'contract': [], 'e2e': [], 'smoke': []},
-                                'observations': [note]}
+                                'planned_case_tests': [], 'observations': [note]}
                     if stage == 'protected_tests':
                         (cwd / 'tests' / 'test_hidden.py').write_text(
                             'import unittest\nfrom calc import add\n'
@@ -378,7 +378,7 @@ class NestTests(unittest.TestCase):
                         assert (cwd / 'tests' / 'test_feature.py').exists()
                         assert not (cwd / 'tests' / 'test_hidden.py').exists()
                         (cwd / 'calc.py').write_text('def add(a, b):\n    return a + b\n')
-                        return {'summary': 'fixed addition', 'files_modified': ['calc.py'], 'observations': [note]}
+                        return {'summary': 'fixed addition', 'files_modified': ['calc.py'], 'test_defects': [], 'observations': [note]}
                     if stage in ('review', 'security_review'):
                         assert not (cwd / 'tests' / 'test_hidden.py').exists()
                         return {'approved': True, 'findings': [], 'summary': 'reviewed', 'observations': [note]}

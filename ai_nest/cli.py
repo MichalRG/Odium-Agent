@@ -53,6 +53,9 @@ _OBSERVATION = _obj({'kind': {'type': 'string', 'enum': ['fact', 'decision', 'ri
                      'severity': {'type': 'string', 'enum': ['info', 'low', 'medium', 'high', 'critical']},
                      'summary': _STRING, 'evidence': _STRING, 'file': _STRING, 'suggested_action': _STRING})
 _INTEGER = {'type': 'integer'}
+# The coder may not edit tests, so it reports a wrong test for the test engineer to correct.
+_CODER = {**_CHANGE, 'test_defects': _list_of(_obj({'file': _STRING, 'test': _STRING, 'problem': _STRING,
+                                                     'evidence': _STRING, 'suggested_fix': _STRING}))}
 _STAGE_FIELDS = {
     'explore': {'summary': _STRING, 'relevant_files': _STRINGS, 'risks': _STRINGS,
                 'context_pack': _obj({'outline': _STRING, 'excerpts': _list_of(_obj({
@@ -64,8 +67,9 @@ _STAGE_FIELDS = {
              'test_changes': _list_of(_obj({'file': _STRING, 'reason': _STRING})), 'browser_checks': _STRINGS,
              'test_cases': _list_of(_obj({'behaviour': _STRING, 'criterion': _STRING, 'level': _STRING}))},
     'tests': {**_CHANGE, 'expected_red_tests': _STRINGS, 'coder_guidance': _STRINGS,
-              'test_strategy': _obj({level: _STRINGS for level in ('unit', 'integration', 'contract', 'e2e', 'smoke')})},
-    'protected_tests': _CHANGE, 'implement': _CHANGE, 'bootstrap': _CHANGE, 'repair': _CHANGE,
+              'test_strategy': _obj({level: _STRINGS for level in ('unit', 'integration', 'contract', 'e2e', 'smoke')}),
+              'planned_case_tests': _list_of(_obj({'case': _INTEGER, 'tests': _STRINGS}))},
+    'protected_tests': _CHANGE, 'implement': _CODER, 'bootstrap': _CHANGE, 'repair': _CODER,
     'review': _VERDICT, 'security_review': _VERDICT,
     'browser': {**_VERDICT, 'scenarios': _list_of(_obj({'scenario': _STRING, 'passed': {'type': 'boolean'},
                                                         'evidence': _STRING, 'screenshot': _STRING}))},
@@ -1158,6 +1162,42 @@ def findings_to_fix(review: dict, cfg: dict) -> list[dict]:
             and not is_blocked_file(f['file'].split(':')[0], cfg)]
 
 
+def test_file_findings(review: dict, cfg: dict) -> list[dict]:
+    """Findings in public test files that the test engineer can fix, at a severity that blocks or is fixed."""
+    policy = cfg.get('review_policy', {})
+    severities = policy.get('fix_severities', ['medium']) + policy.get('blocking_severities', ['critical', 'high'])
+    return [f for f in review['findings'] if f['severity'].lower() in severities
+            and is_test_file(f['file'].split(':')[0], cfg)]
+
+
+def planned_case_gaps(tests: dict, plan: dict, tree: Path, files: list[str]) -> list[str]:
+    """Planned test cases that name no test, or name a test that the public test files do not contain."""
+    cases = plan.get('test_cases', [])
+    named: dict[int, list[str]] = {}
+    for entry in tests['planned_case_tests']:
+        named.setdefault(entry['case'], []).extend(t for t in entry['tests'] if t.strip())
+    text = '\n'.join((tree / f).read_text(encoding='utf-8', errors='replace') for f in files if (tree / f).is_file())
+    gaps = []
+    for number, case in enumerate(cases, 1):
+        absent = [t for t in named.get(number, []) if t not in text]
+        if not named.get(number):
+            gaps.append(f'case {number} ({case["behaviour"]}) names no test')
+        elif absent:
+            gaps.append(f'case {number} ({case["behaviour"]}) names tests not in the files: {", ".join(absent)}')
+    return gaps
+
+
+def browser_gaps(checked: dict, planned: list[str], folder: Path) -> list[str]:
+    """Planned scenarios that the browser agent did not report, or reported without a screenshot file."""
+    gaps = [f'scenario {n} ({s}) not reported' for n, s in enumerate(planned[len(checked['scenarios']):],
+                                                                     len(checked['scenarios']) + 1)]
+    for n, c in enumerate(checked['scenarios'], 1):
+        shot = Path(c['screenshot']) if c['screenshot'] else None
+        if shot is None or not (shot if shot.is_absolute() else folder / shot).is_file():
+            gaps.append(f'scenario {n} ({c["scenario"]}) has no screenshot file')
+    return gaps
+
+
 def safe_failure_feedback(validation: dict, *, protected: bool = True) -> dict:
     """Never pass hidden test stdout/stderr, traceback, assertions or artifacts to coder."""
     feedback = {'cause': 'verification_failed',
@@ -1358,12 +1398,30 @@ def load_approved_plan(repo: Path, run_id: str) -> dict:
             'request': report['request'], 'session': report['session']}
 
 
+def earlier_criteria(repo: Path, run_id: str) -> dict | None:
+    """The acceptance criteria of an earlier plan, which a new plan round keeps unless the owner changes them."""
+    planning = nest_home(repo) / '.ai-nest' / 'runs' / run_id / 'artifacts' / 'planning.json'
+    with contextlib.suppress(OSError, ValueError, KeyError):
+        return {'run_id': run_id,
+                'acceptance_criteria': json.loads(planning.read_text(encoding='utf-8'))['specification']['acceptance_criteria']}
+    return None
+
+
 def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dict,
-               repository: str | None = None, browser_ready: bool = False) -> None:
+               repository: str | None = None, browser_ready: bool = False, previous: dict | None = None) -> None:
     where = f' --repo {repository}' if repository not in (None, '.') else ''
     lines = [f'[AI Nest] PLAN READY FOR APPROVAL (session={session}, run={run_id})',
              f'Goal: {spec["goal"]}', 'Acceptance criteria:']
     lines += [f'  {i}. {c}' for i, c in enumerate(spec['acceptance_criteria'], 1)]
+    if previous:
+        old, new = previous['acceptance_criteria'], spec['acceptance_criteria']
+        added, gone = [c for c in new if c not in old], [c for c in old if c not in new]
+        if added or gone:
+            lines.append(f'Acceptance criteria changed since plan {previous["run_id"]} '
+                         f'({len(added)} new or reworded, {len(gone)} removed or reworded):')
+            lines += [f'  + {c}' for c in added] + [f'  - {c}' for c in gone]
+        else:
+            lines.append(f'Acceptance criteria: unchanged since plan {previous["run_id"]}.')
     for title, items in (('Constraints', spec['constraints']),
                          ('Risks', discovery['risks'] + plan['risks'])):
         if items:
@@ -1379,7 +1437,7 @@ def print_plan(run_id: str, session: str, discovery: dict, spec: dict, plan: dic
         lines.append('Existing tests to change (approving the plan allows the test engineer these edits):')
         lines += [f'  - {c["file"]}: {c["reason"]}' for c in plan['test_changes']]
     if plan.get('browser_checks'):
-        lines.append('Browser checks (Playwright CLI, after the review)'
+        lines.append('Browser checks (Playwright CLI, before the review)'
                      + ('' if browser_ready else '; not run, because the project has no browser_check') + ':')
         lines += [f'  - {check}' for check in plan['browser_checks']]
     lines += [f'Testing: {plan["testing_strategy"]}',
@@ -1436,7 +1494,11 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                      'request': request, 'provider': provider_name, 'base_commit': base_commit,
                      'session': session.name, 'session_id': session.slug,
                      'session_workspace': str(session.root), 'agent_routing': [],
-                     'mode': 'bootstrap' if bootstrap else 'feature'}
+                     'mode': 'bootstrap' if bootstrap else 'feature',
+                     # Shows which version of an edited request file a run read.
+                     'request_sha256': hashlib.sha256(request.encode('utf-8')).hexdigest()}
+    if approved and approved.get('owner_notes'):
+        summary['owner_notes'] = approved['owner_notes']
     branch = 'ai-nest/' + run_id
     code_tree, public_tree, protected_tree, verify_tree, review_tree = (
         run_root / x for x in ('code', 'public-tests', 'protected-tests', 'verification', 'review'))
@@ -1448,7 +1510,9 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         checkout_worktree(repo, code_tree, branch=branch)
         checkout_worktree(repo, public_tree)
         print(f'[AI Nest] session={session.name}, run={run_id}, branch={branch}', flush=True)
-        context = {'user_request': request, 'base_commit': summary['base_commit']}
+        print(f'[AI Nest] request: {len(request)} characters, sha256 {summary["request_sha256"][:12]}', flush=True)
+        context = {'user_request': request, 'base_commit': summary['base_commit'],
+                   **({'owner_notes': summary['owner_notes']} if 'owner_notes' in summary else {})}
         if cfg.get('workspace_run', {}).get('other_repositories'):
             context['workspace'] = {**cfg['workspace_run'], 'rule': (
                 'You work in the target repository only. The other repositories are folders of the workspace: '
@@ -1486,7 +1550,10 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
             print(f'[AI Nest] context pack for the later stages: {summary["context_pack"]}', flush=True)
             context = {**context, 'context_pack': pack}
         if not approved:
-            spec = agent_stage(provider, session, 'specify', code_tree, {**context, 'discovery': discovery})
+            previous = earlier_criteria(repo, earlier['run_id']) if earlier else None
+            spec = agent_stage(provider, session, 'specify', code_tree,
+                               {**context, 'discovery': discovery,
+                                **({'previous_specification': previous} if previous else {})})
             if not spec['acceptance_criteria'] or (spec['open_questions'] and not plan_only):
                 raise Blocked(f'Missing acceptance criteria / unresolved questions: {spec["open_questions"]}')
             if spec['open_questions']:
@@ -1507,7 +1574,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 summary.update({'status': 'planned', 'completed': now()})
                 write_json(run_root / 'report.json', summary)
                 session.record_result('planned', run_root / 'report.json')
-                print_plan(run_id, session.name, discovery, spec, plan, os.path.relpath(repo), browser is not None)
+                print_plan(run_id, session.name, discovery, spec, plan, os.path.relpath(repo), browser is not None,
+                           previous)
                 return 0
         # Plans made before commit planning existed have none; the merge then makes one commit.
         summary['planned_commits'] = plan.get('commits', [])
@@ -1545,8 +1613,21 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 setup_environment(public_tree, cfg, artifacts / 'public_setup.json')
                 static_log = public_tests_static_failure(public_tree, cfg,
                                                          artifacts / f'public_static_{tests_attempt}.json')
-                if not static_log:
+                gaps = [] if static_log else planned_case_gaps(tests, plan, public_tree, public_files)
+                if not static_log and not gaps:
                     break
+                if gaps:
+                    print(f'[AI Nest] public tests miss planned test cases (attempt {tests_attempt}/2): '
+                          + '; '.join(gaps), flush=True)
+                    if tests_attempt == 2:
+                        summary['planned_case_gaps'] = gaps  # the reviewer and the owner judge them
+                        break
+                    # The tests stay in the tree: the test engineer adds the missing ones.
+                    tests_context = {**tests_context, 'feedback': {
+                        'cause': 'planned_test_cases_missing', 'gaps': gaps,
+                        'guidance': 'Write a test for each planned case, keep your other tests, and name the tests '
+                                    'of each case in planned_case_tests exactly as the test files define them.'}}
+                    continue
                 print(f'[AI Nest] public tests fail static checks (attempt {tests_attempt}/2)', flush=True)
                 if tests_attempt == 2:
                     raise Blocked('Public tests still fail static checks, which the coder may not fix: '
@@ -1607,22 +1688,79 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
             print(f'[AI Nest] Report: {run_root / "report.json"}', flush=True)
             return 0
 
+        # The coder may not edit tests: defects that it or a reviewer finds in them go to the test engineer,
+        # who corrects them once per run; the coder's code is kept and verified again with the corrected tests.
+        test_defects: list[dict] = []
+        test_fix_rounds = int(cfg.get('limits', {}).get('max_test_fix_rounds', 1)) if public_patch else 0
+        keep_code = False
+
+        def correct_tests(defects: list[dict], failure: dict) -> bool:
+            """Let the test engineer correct reported test defects; False leaves the public tests as they were."""
+            nonlocal tests, public_patch, public_files
+            number = len(summary.get('test_fixes', [])) + 1
+            print(f'[AI Nest] the test engineer checks {len(defects)} reported test defects', flush=True)
+            fix_context = {k: v for k, v in tests_context.items() if k != 'feedback'}
+            try:
+                answer = agent_stage(provider, session, 'tests', public_tree,
+                                     {**fix_context, 'test_fix': {'defects': defects, 'failure': failure}},
+                                     write=True, attempt=attempt)
+                patch = artifacts / f'public_tests_fix_{number}.patch'
+                files = get_patch(public_tree, patch, cfg, test_only=True,
+                                  editable_tests={normalized_path(c['file']) for c in test_changes})
+                if set(answer['files_modified']) != set(files):
+                    raise Blocked('Test engineer declared files do not match the corrected test patch.')
+                static_log = public_tests_static_failure(public_tree, cfg, artifacts / f'public_static_fix_{number}.json')
+                if static_log:
+                    raise Blocked('The corrected public tests fail static checks: ' + static_log[-500:])
+            except Blocked as ex:
+                print(f'[AI Nest] the tests stay as they were: {ex}', flush=True)
+                checkout_reset(public_tree, base_commit, public_patch)
+                return False
+            tests, public_patch, public_files = answer, patch, files
+            summary.update({'public_test_files': files,
+                            'public_tests_sha256': hashlib.sha256(patch.read_bytes()).hexdigest()})
+            summary.setdefault('test_fixes', []).append({'attempt': attempt, 'defects': defects,
+                                                         'summary': answer['summary'], 'files': files})
+            return True
+
+        def as_defects(findings: list[dict]) -> list[dict]:
+            return [{'file': f['file'], 'test': '', 'problem': f['problem'], 'evidence': f['evidence'],
+                     'suggested_fix': ''} for f in findings]
+
         max_attempts = int(cfg.get('limits', {}).get('max_repair_attempts', 2)) + 1
-        for attempt in range(1, max_attempts + 1):
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
             print(f'[AI Nest] implementation attempt {attempt}/{max_attempts}', flush=True)
             stage = 'bootstrap' if bootstrap else 'repair' if code_in_tree else 'implement'
             stopped = ''
             security = None
+            coder_defects: list[dict] = []
+            skip_coder, keep_code = keep_code, False
+            if test_defects:
+                defects, test_defects = test_defects, []
+                if correct_tests(defects, feedback):
+                    # The code tree gets the corrected tests under the same code.
+                    checkout_reset(code_tree, base_commit, public_patch)
+                    apply_patch(code_tree, code_patch)
+                    feedback = {**feedback, 'tests_corrected': summary['test_fixes'][-1]['summary']}
+                else:
+                    skip_coder = False
             try:
                 try:
-                    agent_stage(provider, session, stage, code_tree,
-                                {**context, 'specification': spec, 'plan': plan,
-                                 'public_tdd': {'files': public_files, 'red_status': red_status,
-                                                'expected_red_tests': tests['expected_red_tests'],
-                                                'coder_guidance': tests['coder_guidance'],
-                                                'test_strategy': tests['test_strategy']}
-                                  if public_patch else {'enabled': False},
-                                 'feedback': feedback}, write=True, attempt=attempt)
+                    if skip_coder:
+                        print(f'[AI Nest] attempt {attempt}: the code stays; it is verified with the corrected tests',
+                              flush=True)
+                    else:
+                        answer = agent_stage(provider, session, stage, code_tree,
+                                             {**context, 'specification': spec, 'plan': plan,
+                                              'public_tdd': {'files': public_files, 'red_status': red_status,
+                                                             'expected_red_tests': tests['expected_red_tests'],
+                                                             'coder_guidance': tests['coder_guidance'],
+                                                             'test_strategy': tests['test_strategy']}
+                                              if public_patch else {'enabled': False},
+                                              'feedback': feedback}, write=True, attempt=attempt)
+                        coder_defects = answer.get('test_defects', [])
                 except TimedOut as ex:
                     # Keep the unfinished code: it still passes the checks below, and repair continues it.
                     assert_local_files_intact(code_tree, stage)
@@ -1659,6 +1797,12 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                     feedback = safe_failure_feedback(validation, protected=protected_patch is not None)
                     if stopped:
                         feedback['previous_attempt'] = f'{stopped}. Its unfinished code is in your worktree; continue it.'
+                    if coder_defects and test_fix_rounds:
+                        # The coder says its code is right and a test is wrong: no repair attempt is spent on it.
+                        test_fix_rounds, test_defects, keep_code = test_fix_rounds - 1, coder_defects, True
+                        max_attempts += 1
+                        print(f'[AI Nest] attempt {attempt}: the coder reports {len(coder_defects)} defects in the '
+                              'public tests', flush=True)
                     continue
                 # Reviewers see production code and public tests only. Hidden tests
                 # live exclusively in the transient verification checkout.
@@ -1688,6 +1832,30 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                     if not recheck['passed']:
                         feedback = safe_failure_feedback(recheck, protected=False)
                         continue
+                checked = None
+                if browser_checks:
+                    # Before the review, so that the reviewer gets the evidence from the running app.
+                    # The browser agent sees the running app, like a user, and no code.
+                    browser_dir = artifacts / f'browser_check_{attempt}'
+                    browser_dir.mkdir()
+                    git(browser_dir, 'init', '-q')  # provider CLIs and the progress watch expect a Git folder
+                    with dev_server(verify_tree, browser, artifacts / f'dev_server_{attempt}.log'):
+                        checked = provider.run('browser', browser_dir, {
+                            'browser': {'url': browser['url'], 'scenarios': browser_checks,
+                                        'session': f'nest-{run_id}', 'screenshots': str(browser_dir)},
+                            'specification': spec, 'nest_session': session.handoff_context('browser')}, write=True)
+                    session.record('browser', checked, attempt=attempt)
+                    # A missing screenshot is missing evidence for the reviewer, not worth a second browser run.
+                    missing = browser_gaps(checked, browser_checks, browser_dir)
+                    if missing:
+                        summary['browser_evidence_missing'] = missing
+                        print(f'[AI Nest] attempt {attempt}: browser evidence missing: ' + '; '.join(missing), flush=True)
+                    failed = [c for c in checked['scenarios'] if not c['passed']]
+                    if failed or blocking_findings(checked, cfg) or len(checked['scenarios']) < len(browser_checks):
+                        feedback = {'cause': 'browser_check_failed', 'failed_scenarios': failed,
+                                    'findings': checked['findings'], 'summary': checked['summary']}
+                        print(f'[AI Nest] attempt {attempt}: browser check failed: {checked["summary"]}', flush=True)
+                        continue
                 before = git(review_tree, 'status', '--porcelain')
                 # Generated lockfiles would exhaust the review budget; they stay readable in the checkout.
                 pathspec = ['.', *[f':(exclude,glob)**/{name}' for name in LOCKFILES]]
@@ -1712,6 +1880,13 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                                     **({'context_pack': pack} if pack else {}),
                                                     'diff': diff, **part, 'lockfiles_omitted_from_diff': omitted,
                                                     'verification_passed': True, **extra,
+                                                    **({'browser_check': {
+                                                        'summary': checked['summary'],
+                                                        'scenarios': [{k: s[k] for k in ('scenario', 'passed', 'evidence')}
+                                                                      for s in checked['scenarios']]}}
+                                                       if checked else {}),
+                                                    **{k: summary[k] for k in ('test_fixes', 'planned_case_gaps', 'browser_evidence_missing',
+                                                                               'owner_notes') if k in summary},
                                                     'base_commit': base_commit}, attempt=attempt))
                     if len(answers) == 1:
                         return answers[0]
@@ -1728,8 +1903,14 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                 if git(review_tree, 'status', '--porcelain') != before:
                     raise Blocked('Reviewer changed repository files')
                 blockers = blocking_findings(review, cfg)
+                in_tests = test_file_findings(review, cfg) if test_fix_rounds else []
+                if in_tests:
+                    test_fix_rounds, test_defects = test_fix_rounds - 1, as_defects(in_tests)
+                code_blockers = [f for f in blockers if f not in in_tests]
                 if blockers:
-                    feedback = {'cause': 'review_blockers', 'findings': blockers,
+                    if not code_blockers:  # only the tests block: the code stays and is verified again
+                        keep_code, max_attempts = True, max_attempts + 1
+                    feedback = {'cause': 'review_blockers', 'findings': code_blockers,
                                 'review_summary': review['summary']}
                     continue
                 if not review['approved'] and not review['findings']:
@@ -1744,6 +1925,8 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                                  'invoked': needs_sec,
                                                  'reason': reasons or ['No configured sensitive paths affected']})
                 session.record_routing(summary['agent_routing'])
+                print(f'[AI Nest] security review: {"runs" if needs_sec else "skipped"} ('
+                      + '; '.join(reasons or ['no configured sensitive path changed']) + ')', flush=True)
                 if needs_sec:
                     sec = reviewed('security_review', {'risk_reason': reasons})
                     if git(review_tree, 'status', '--porcelain') != before:
@@ -1755,29 +1938,12 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                     if not sec['approved'] and not sec['findings']:
                         raise Unrepairable('Security reviewer withheld approval without specific findings.')
                     security = sec
-                checked = None
-                if browser_checks:
-                    # The browser agent sees the running app, like a user, and no code.
-                    browser_dir = artifacts / f'browser_check_{attempt}'
-                    browser_dir.mkdir()
-                    git(browser_dir, 'init', '-q')  # provider CLIs and the progress watch expect a Git folder
-                    with dev_server(verify_tree, browser, artifacts / f'dev_server_{attempt}.log'):
-                        checked = provider.run('browser', browser_dir, {
-                            'browser': {'url': browser['url'], 'scenarios': browser_checks,
-                                        'session': f'nest-{run_id}', 'screenshots': str(browser_dir)},
-                            'specification': spec, 'nest_session': session.handoff_context('browser')}, write=True)
-                    session.record('browser', checked, attempt=attempt)
-                    failed = [c for c in checked['scenarios'] if not c['passed']]
-                    if failed or blocking_findings(checked, cfg) or len(checked['scenarios']) < len(browser_checks):
-                        feedback = {'cause': 'browser_check_failed', 'failed_scenarios': failed,
-                                    'findings': checked['findings'], 'summary': checked['summary']}
-                        print(f'[AI Nest] attempt {attempt}: browser check failed: {checked["summary"]}', flush=True)
-                        continue
                 if git(code_tree, 'rev-parse', 'HEAD') != base_commit:
                     raise Blocked('Final worktree HEAD differs from trusted base commit')
                 accepted = {'attempt': attempt, 'code_files': code_files, 'review': review,
                             'verification': str(verification_file), 'code_patch': code_patch,
-                            'security_review': security, 'created': created, 'browser': checked}
+                            'security_review': security, 'created': created, 'browser': checked,
+                            'public_patch': public_patch, 'public_files': public_files}
                 to_fix = findings_to_fix(review, cfg)
                 if to_fix and attempt < max_attempts:
                     feedback = {'cause': 'review_findings_to_fix', 'findings': to_fix,
@@ -1786,6 +1952,12 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
                                             'finding is wrong, leave that code and explain why in an observation.'}
                     print(f'[AI Nest] attempt {attempt} verified and approved; '
                           f'the coder now fixes {len(to_fix)} review findings', flush=True)
+                    continue
+                if test_defects:
+                    keep_code, max_attempts = True, max_attempts + 1
+                    feedback = {'cause': 'review_findings_in_tests'}
+                    print(f'[AI Nest] attempt {attempt} verified and approved; '
+                          f'the test engineer now checks {len(test_defects)} review findings in tests', flush=True)
                     continue
                 return finish(accepted)
             except Blocked as ex:
@@ -1797,8 +1969,12 @@ def run_feature(repo: Path, request: str, provider_name: str, allow_host: bool,
         if accepted is not None:
             print(f'[AI Nest] fixing the review findings did not pass the gates again; '
                   f'keeping approved attempt {accepted["attempt"]}', flush=True)
-            checkout_reset(code_tree, base_commit, public_patch)
+            # Its own tests: corrected tests that failed the gates must not stand beside the verified code.
+            checkout_reset(code_tree, base_commit, accepted['public_patch'])
             apply_patch(code_tree, accepted['code_patch'])
+            if accepted['public_patch'] != public_patch:
+                summary.update({'public_test_files': accepted['public_files'], 'public_tests_sha256': hashlib.sha256(
+                    accepted['public_patch'].read_bytes()).hexdigest(), 'test_fixes_dropped': True})
             summary['review_fix_failed'] = str(feedback)[:1000]
             return finish(accepted)
         raise Blocked(f'Repair budget exhausted; latest evidence: {str(feedback)[:1000]}')
@@ -2054,6 +2230,8 @@ def main() -> int:
         if cmd == 'run':
             p.add_argument('--from-plan', metavar='RUN_ID', default=None,
                            help='Implement the approved plan of this `plan` run (request and session come from it)')
+            p.add_argument('--notes', default=None,
+                           help='With --from-plan: the owner\'s approval notes, which the build stages and the review get')
         if cmd == 'audit-tests':
             p.add_argument('--session', required=True, help='The session whose verified slices form the milestone')
         if cmd == 'sessions':
@@ -2082,8 +2260,12 @@ def main() -> int:
             if args.feature or args.session:
                 raise Blocked('--from-plan takes the request and session from the plan run; omit them.')
             approved = load_approved_plan(repo, args.from_plan)
+            if args.notes:
+                approved['owner_notes'] = args.notes
             return run_feature(repo, approved['request'], args.provider, args.allow_host_execution,
                                approved['session'], approved=approved)
+        if args.command == 'run' and args.notes:
+            raise Blocked('--notes goes with --from-plan: notes on an approved plan. Without a plan, add them to the request.')
         if args.command in ('plan', 'run', 'bootstrap'):
             if not args.feature:
                 raise Blocked(f'{args.command} needs a request: text, --request-file'

@@ -6,7 +6,7 @@ You check the running application in a real browser with the Playwright CLI (`pl
 
 - Check each scenario in `browser.scenarios`, and only those. The owner approved them with the plan. The acceptance criteria in `specification` say what correct means.
 - Start every command with `playwright-cli -s=<browser.session>`, so that the run uses its own browser. `playwright-cli --help` lists the commands. The usual sequence is: `open <browser.url>`, `snapshot` to read the page and get element references, then `click`, `fill`, `type`, `press`, `drag` or `mousewheel` to act like a user.
-- Take a screenshot as the evidence of each result: `screenshot --filename=<browser.screenshots>/<scenario number>-<short name>.png`. Look at each screenshot yourself before you decide. Use it to judge what a snapshot cannot show, such as canvas content, layout and overlap.
+- Save one screenshot per scenario as the evidence of its result: `screenshot --filename=<browser.screenshots>/<scenario number>-<short name>.png`. Judge from the page snapshot when it shows the result (text, state, dialogs, errors), because reading an image costs much more. Look at the screenshot only for what a snapshot cannot show, such as canvas content, layout and overlap.
 - Judge only what a user can observe: shown text and state, the picture, errors on the page, and errors in the browser console.
 - For each scenario, try the main path and one obvious edge case, such as empty input or repeating the action.
 - When the page does not load, take a screenshot, report the scenario as failed, and describe what you saw.

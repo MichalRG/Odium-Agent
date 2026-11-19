@@ -58,6 +58,11 @@ elif '# Role: test-engineer — PUBLIC' in prompt:
     else:
         body = 'import unittest\nfrom calc import add\nclass TestCalc(unittest.TestCase):\n    def test_add(self):\n        self.assertEqual(add(1,2),3)\n'
         expected = ['test_add']
+    fixing = '"test_fix": {' in prompt
+    if scenario == 'test_defect' and not fixing:
+        body = body.replace('add(1,2),3', 'add(1,2),4')  # a wrong expectation that the coder reports
+    if fixing:
+        assert ('expects 4' if scenario == 'test_defect' else 'weak test') in prompt
     if scenario == 'tests_lint_stuck' or (scenario == 'tests_lint' and 'public_tests_fail_static_checks' not in prompt):
         body = 'import unittest\nimport os\n' + body.replace('import unittest\n', '', 1)  # unsorted, like ruff I001
     (base/'tests/test_feature.py').write_text(body)
@@ -84,7 +89,9 @@ elif '# Role: test-engineer — PUBLIC' in prompt:
             files.append(rel)
     result = {'summary':'new public test', 'files_modified':files,
               'expected_red_tests':expected, 'coder_guidance':['make test_add pass'],
-              'test_strategy':{'unit': ['test_add'], 'integration': [], 'contract': [], 'e2e': [], 'smoke': []}}
+              'test_strategy':{'unit': ['test_add'], 'integration': [], 'contract': [], 'e2e': [], 'smoke': []},
+              'planned_case_tests':[] if scenario == 'case_gap_stuck' or (scenario == 'case_gap' and 'planned_test_cases_missing' not in prompt)
+                                   else [{'case': 1, 'tests': ['test_add']}]}
 elif '# Role: coder —' in prompt:
     if 'worker_policy_or_execution_error' in prompt:
         # A retry after a block starts again from the reset tree, public tests intact.
@@ -113,7 +120,9 @@ elif '# Role: coder —' in prompt:
         import time; time.sleep(60)
     else:
         (base/'calc.py').write_text('def add(a,b):\n    return a+b\n')
-    result = {'summary':'attempted', 'files_modified':['calc.py']}
+    result = {'summary':'attempted', 'files_modified':['calc.py'], 'test_defects':
+              [{'file':'tests/test_feature.py','test':'test_add','problem':'expects 4','evidence':'AC1: add(1,2)==3',
+                'suggested_fix':'expect 3'}] if scenario == 'test_defect' else []}
 elif '# Role: coder repair' in prompt:
     assert (base/'tests/test_feature.py').is_file()
     assert (base/'tests/test_feature.py').read_text().find('assertEqual')!=-1
@@ -129,7 +138,7 @@ elif '# Role: coder repair' in prompt:
         (base/'calc.py').write_text('def add(a,b):\n    return a-b\n')
     else:
         (base/'calc.py').write_text('def add(a, b):\n    return a + b\n')
-    result = {'summary':'repaired', 'files_modified':['calc.py']}
+    result = {'summary':'repaired', 'files_modified':['calc.py'], 'test_defects':[]}
 elif '# Role: bootstrapper' in prompt:
     if scenario == 'bootstrap_gate_edit' and 'worker_policy_or_execution_error' not in prompt:
         (base/'scripts/bootstrap.sh').write_text('#!/bin/sh\n')  # a Nest gate path, never creatable
@@ -160,6 +169,8 @@ elif '# Role: test auditor' in prompt:
               'excess': []}
 elif '# Role: code-reviewer' in prompt or '# Role: security-reviewer' in prompt:
     result = {'approved':True,'findings':[],'summary':'approved'}
+    if scenario == 'browser':
+        assert '"browser_check": {' in prompt and 'page checked' in prompt  # the browser check runs first
     earlier_reviews = Path(args[args.index('--output-last-message') + 1]).parent.glob('review_*.answer.json')
     if '# Role: code-reviewer' in prompt and scenario.startswith('review_') and not list(earlier_reviews):
         result['findings'] = [
@@ -470,6 +481,61 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual([s for s in stages if s.startswith(('implement', 'repair', 'review'))],
                          ['implement_01', 'repair_01', 'review_01', 'review_02'])
 
+    def test_a_test_that_the_coder_reports_wrong_goes_to_the_test_engineer_and_the_code_stays(self):
+        root, env = self.feature_project('test_defect')
+        p = self.nest(root, env, 'run', '--session', 'calc', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('the coder reports 1 defects in the public tests', p.stdout)
+        self.assertIn('the code stays; it is verified with the corrected tests', p.stdout)
+        run_dir = next((root / '.ai-nest/runs').iterdir())
+        report = json.loads((run_dir / 'report.json').read_text())
+        self.assertEqual((report['status'], report['attempts']), ('verified', 2))
+        self.assertEqual([d['test'] for d in report['test_fixes'][0]['defects']], ['test_add'])
+        self.assertIn('add(1,2),3', (Path(report['worktree']) / 'tests/test_feature.py').read_text())
+        stages = sorted(f.name.split('.')[0] for f in (run_dir / 'artifacts').glob('*.schema.json'))
+        self.assertEqual([s for s in stages if s.startswith(('implement', 'repair'))], ['implement_01'],
+                         'no repair attempt is spent on a wrong test')
+
+    def test_review_findings_in_tests_go_to_the_test_engineer(self):
+        root, env = self.feature_project('review_findings')
+        p = self.nest(root, env, 'run', '--session', 'calc', '--allow-host-execution', 'Fix addition')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        report = json.loads(next((root / '.ai-nest/runs').glob('*/report.json')).read_text())
+        self.assertEqual([d['problem'] for d in report['test_fixes'][0]['defects']], ['weak test'])
+
+    def test_planned_test_cases_without_a_test_go_back_to_the_test_engineer(self):
+        for scenario, gaps in (('case_gap', None), ('case_gap_stuck', ['case 1 (add(1, 2) returns 3) names no test'])):
+            root, env = self.feature_project(scenario)
+            p = self.nest(root, env, 'run', '--session', 'calc', '--allow-host-execution', 'Fix addition')
+            self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+            self.assertIn('public tests miss planned test cases (attempt 1/2)', p.stdout)
+            report = json.loads(next((root / '.ai-nest/runs').glob('*/report.json')).read_text())
+            self.assertEqual(report.get('planned_case_gaps'), gaps, scenario)
+
+    def test_a_new_plan_round_shows_changed_criteria_and_notes_reach_the_build(self):
+        root, env = self.feature_project('happy')
+        prompts = Path(root.parent) / 'prompts.log'
+        env = {**env, 'NEST_FAKE_PROMPTS': str(prompts)}
+        ask = ('plan', '--session', 'calc', '--allow-host-execution')
+        self.assertEqual(self.nest(root, env, *ask, 'Fix addition').returncode, 0)
+        p = self.nest(root, env, *ask, 'Fix addition\n\nOwner feedback on the previous plan:\nfine')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        first = min(d.name for d in (root / '.ai-nest/runs').iterdir())
+        self.assertIn(f'Acceptance criteria: unchanged since plan {first}.', p.stdout)
+        self.assertIn('"previous_specification": {', prompts.read_text())
+        second = max(d.name for d in (root / '.ai-nest/runs').iterdir())
+        refused = self.nest(root, env, 'run', '--session', 'calc', '--notes', 'x', '--allow-host-execution', 'Fix')
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn('--notes goes with --from-plan', refused.stderr)
+        prompts.write_text('')
+        p = self.nest(root, env, 'run', '--from-plan', second, '--notes', 'keep the name add', '--allow-host-execution')
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn('security review: skipped (no configured sensitive path changed)', p.stdout)
+        self.assertRegex(p.stdout, r'request: \d+ characters, sha256 [0-9a-f]{12}')
+        report = json.loads(Path(p.stdout.split('Report: ')[-1].strip()).read_text())
+        self.assertEqual(report['owner_notes'], 'keep the name add')
+        self.assertEqual(prompts.read_text().count('keep the name add'), 3, 'test engineer, coder and reviewer')
+
     def test_failed_fix_of_review_findings_keeps_the_approved_attempt(self):
         root, env = self.feature_project('review_fix_breaks')
         p = self.nest(root, env, 'run', '--provider', 'codex', '--session', 'calc',
@@ -478,6 +544,7 @@ class EndToEndTests(unittest.TestCase):
         report = json.loads(next((root / '.ai-nest/runs').glob('*/report.json')).read_text())
         self.assertEqual((report['status'], report['attempts']), ('verified', 1))
         self.assertIn('verification_failed', report['review_fix_failed'])
+        self.assertTrue(report['test_fixes_dropped'], 'the approved attempt keeps the tests it was verified with')
         self.assertEqual(len(report['review']['findings']), 2, 'the unfixed findings stay in the report')
         self.assertIn('a+b', (Path(report['worktree']) / 'calc.py').read_text())
 

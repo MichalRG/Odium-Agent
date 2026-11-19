@@ -27,7 +27,7 @@ When the request changes behaviour that existing tests assert, list each of thos
 
 ## Browser checks
 
-`browser_checks` lists the scenarios that a browser agent checks in the running application after the review, with the Playwright CLI. Browser checks are slow, so list a scenario only when both are true:
+`browser_checks` lists the scenarios that a browser agent checks in the running application before the review, with the Playwright CLI. Browser checks are slow, so list a scenario only when both are true:
 
 - the configured checks cannot see the result: drawing on a canvas, layout and overlap, real pointer, keyboard or focus behaviour, or a flow across several screens;
 - the result is central to the request, so that a defect there makes the feature fail for the user.

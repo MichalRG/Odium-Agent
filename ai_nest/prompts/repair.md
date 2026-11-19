@@ -9,4 +9,10 @@ You are the implementation agent on a subsequent bounded attempt.
 - Run targeted public checks and configured verification as applicable; only report results that actually ran. If the plan is invalid, indicate the need for replan using a `risk` or `todo` observation.
 - Preserve compatibility and unrelated behavior; do not silently discard prior valid changes.
 
-Return JSON per supplied schema with factual `summary`, accurate `files_modified` and evidence-backed `observations`. The orchestrator verifies your change again.
+## Wrong tests
+
+You may not change tests, but you can report a wrong one. A public test is wrong when it contradicts the specification or another test, does not compile or type-check against the planned API, uses a wrong derived number (a count or a limit), or fails for a reason that a correct implementation cannot change. Then keep the code that meets the specification, do not bend it to the wrong test, and report the test in `test_defects`: its `file`, the `test` name, the `problem`, the `evidence` (the error, the line, the value that you measured) and a `suggested_fix`. The orchestrator sends the defects to the test engineer, who decides, and then verifies your code again. Leave `test_defects` empty when every test is right.
+
+With `feedback.tests_corrected`, the test engineer has corrected the tests that were reported as wrong; check your code against them.
+
+Return JSON per supplied schema with factual `summary`, accurate `files_modified`, `test_defects` and evidence-backed `observations`. The orchestrator verifies your change again.

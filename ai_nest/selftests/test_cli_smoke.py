@@ -77,7 +77,8 @@ elif '# Role: test-engineer — PUBLIC' in prompt:
         '    def test_add(self):\\n        self.assertEqual(add(1,2),3)\\n')
     payload={'summary':'public TDD','files_modified':['tests/test_feature.py'],
              'expected_red_tests':['test_add'], 'coder_guidance':['pass public unit tests'],
-             'test_strategy':{'unit':['test_add'],'integration':[],'contract':[],'e2e':[],'smoke':[]}}
+             'test_strategy':{'unit':['test_add'],'integration':[],'contract':[],'e2e':[],'smoke':[]},
+             'planned_case_tests':[]}
 elif '# Role: protected acceptance test-engineer' in prompt:
     (base/'tests/test_hidden.py').write_text(
         'import unittest\\nfrom calc import add\\nclass TestHidden(unittest.TestCase):\\n'
@@ -87,7 +88,7 @@ elif '# Role: coder —' in prompt:
     assert (base/'tests/test_feature.py').exists()
     assert not (base/'tests/test_hidden.py').exists()
     (base/'calc.py').write_text('def add(a,b):\\n    return a+b\\n')
-    payload={'summary':'implemented','files_modified':['calc.py']}
+    payload={'summary':'implemented','files_modified':['calc.py'],'test_defects':[]}
 elif '# Role: code-reviewer' in prompt:
     assert not (base/'tests/test_hidden.py').exists()
     payload={'approved':True,'findings':[],'summary':'reviewed'}

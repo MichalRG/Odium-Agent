@@ -153,7 +153,7 @@ A question or feedback round does not start over. When HEAD and the reference do
 
 Build a large request in slices: one plan, approval, run and merge per slice, all in the same `--session`, each planned after the previous slice is merged. The chat proposes slices when a plan is large. Smaller slices verify faster, get a more focused review and lose less when an attempt fails.
 
-To skip the approval, `run --session <name> --allow-host-execution "<request>"` does both steps in one command and blocks on open questions. Use `--provider claude` for Claude Code agents or `--provider copilot` for GitHub Copilot CLI agents.
+To skip the approval, `run --session <name> --allow-host-execution "<request>"` does both steps in one command and blocks on open questions. It keeps no approvable plan, so a retry plans again; when a build may need a retry, run `plan` and then `run --from-plan`, which can build the same plan again while HEAD has not moved. Use `--provider claude` for Claude Code agents or `--provider copilot` for GitHub Copilot CLI agents.
 
 A long request (with owner answers, feedback or slice notes) goes in a file: `--request-file .ai-nest/requests/<session>.md` replaces the request argument of `plan`, `run` and `bootstrap`. The file must be in an ignored folder such as `.ai-nest/`, because the source checkout must be clean.
 
